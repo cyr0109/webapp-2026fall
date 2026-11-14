@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.db
+*.bak
+*.zip
+node_modules/
+dist/
+.DS_Store
+
+# 只放程式碼；文件除了 README 都不上 git
+Milestone*/
+docs/
+draft.*
+CONTEXT.md
+final_project_description.md
