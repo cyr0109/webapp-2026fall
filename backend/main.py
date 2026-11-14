@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from auth import create_token, current_user, get_db, hash_password, verify_password
 from models import (
-    Expense, ExpenseShare, Group, Invite, Member, Settlement, SettlementTransfer, User, init_db,
+    Expense, ExpenseShare, Group, Invite, Member, Settlement, SettlementTransfer, User, init_db, now,
 )
 
 INVITE_TTL = timedelta(days=7)
@@ -85,12 +85,17 @@ class SettlementIn(BaseModel):
     expense_ids: list[int] = Field(min_length=1)
 
 
+class TransferOut(DebtOut):
+    id: int
+    paid_at: str | None
+
+
 class SettlementOut(BaseModel):
     id: int
     initiated_by_member_id: int
     created_at: str
     expense_ids: list[int]
-    transfers: list[DebtOut]
+    transfers: list[TransferOut]
 
 
 class MemberStatusIn(BaseModel):
@@ -265,7 +270,7 @@ def set_member_status(
 # ---------- 邀請連結 ----------
 
 def utcnow_naive() -> datetime:
-    # SQLite 存回來的 DateTime 不帶時區，比較時兩邊都用不帶時區的 UTC
+    # DateTime 欄位存回來不帶時區，比較時兩邊都用不帶時區的 UTC
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -464,10 +469,41 @@ def to_settlement_out(s: Settlement) -> SettlementOut:
         created_at=s.created_at.isoformat(),
         expense_ids=sorted(e.id for e in s.expenses),
         transfers=[
-            DebtOut(from_member_id=t.from_member_id, to_member_id=t.to_member_id, amount=t.amount)
+            TransferOut(
+                id=t.id,
+                from_member_id=t.from_member_id,
+                to_member_id=t.to_member_id,
+                amount=t.amount,
+                paid_at=t.paid_at.isoformat() if t.paid_at else None,
+            )
             for t in s.transfers
         ],
     )
+
+
+@app.post(
+    "/groups/{group_id}/settlements/{settlement_id}/transfers/{transfer_id}/paid",
+    response_model=SettlementOut,
+)
+def confirm_paid(
+    group_id: int,
+    settlement_id: int,
+    transfer_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """收款人確認收到這筆轉帳。只有收款人能按，避免付款人自己說付了就算數。"""
+    me = require_member(group_id, user, db)
+    t = db.get(SettlementTransfer, transfer_id)
+    if t is None or t.settlement_id != settlement_id or t.settlement.group_id != group_id:
+        raise HTTPException(404, "找不到這筆轉帳")
+    if t.to_member_id != me.id:
+        raise HTTPException(403, "只有收款人能確認收到")
+    if t.paid_at is not None:
+        raise HTTPException(409, "這筆已經確認過了")
+    t.paid_at = now()
+    db.commit()
+    return to_settlement_out(t.settlement)
 
 
 @app.get("/groups/{group_id}/settlements", response_model=list[SettlementOut])
@@ -495,6 +531,8 @@ def cancel_settlement(
     settlement = db.get(Settlement, settlement_id)
     if settlement is None or settlement.group_id != group_id:
         raise HTTPException(404, "找不到這次結算")
+    if any(t.paid_at for t in settlement.transfers):
+        raise HTTPException(409, "已經有人確認收款，不能復原這次結算")
     for e in settlement.expenses:
         e.settlement_id = None
     db.delete(settlement)

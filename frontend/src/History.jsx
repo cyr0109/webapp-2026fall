@@ -52,12 +52,30 @@ export default function History() {
                   <p className="empty">無需轉帳，各自負擔已相抵。</p>
                 ) : (
                   <ul className="rows">
-                    {s.transfers.map((t, i) => (
-                      <li key={i} className="row">
+                    {s.transfers.map((t) => (
+                      <li key={t.id} className="row">
                         <div className="row-main">
                           {nameOf(t.from_member_id)}
                           <span className="balance-verb">付給</span>
                           {nameOf(t.to_member_id)}
+                          <span className="row-meta">
+                            {t.paid_at ? `已收款 ${stamp(t.paid_at)}` : "待付款"}
+                          </span>
+                          {!t.paid_at && t.to_member_id === me && (
+                            <button
+                              className="quiet"
+                              onClick={() =>
+                                run(() =>
+                                  api(
+                                    `/groups/${groupId}/settlements/${s.id}/transfers/${t.id}/paid`,
+                                    { method: "POST" }
+                                  )
+                                )
+                              }
+                            >
+                              確認收到
+                            </button>
+                          )}
                         </div>
                         {/* 紅色只代表「你要付出去的錢」，收進來的用一般墨色 */}
                         <span className={t.from_member_id === me ? "figure debit" : "figure"}>
@@ -85,17 +103,23 @@ export default function History() {
                   ))}
                 </ul>
 
-                <button
-                  className="quiet danger"
-                  onClick={() =>
-                    run(() =>
-                      api(`/groups/${groupId}/settlements/${s.id}`, { method: "DELETE" })
-                    )
-                  }
-                >
-                  復原這次結算
-                </button>
-                <p className="empty">復原後，涵蓋的項目會退回未結，可以再編輯。</p>
+                {s.transfers.some((t) => t.paid_at) ? (
+                  <p className="empty">已有人確認收款，這次結算不能復原。</p>
+                ) : (
+                  <>
+                    <button
+                      className="quiet danger"
+                      onClick={() =>
+                        run(() =>
+                          api(`/groups/${groupId}/settlements/${s.id}`, { method: "DELETE" })
+                        )
+                      }
+                    >
+                      復原這次結算
+                    </button>
+                    <p className="empty">復原後，涵蓋的項目會退回未結，可以再編輯。</p>
+                  </>
+                )}
               </div>
             </details>
           );

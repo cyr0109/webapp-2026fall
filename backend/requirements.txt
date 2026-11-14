@@ -6,3 +6,4 @@ bcrypt
 pyjwt
 httpx
 httpx2
+psycopg[binary]

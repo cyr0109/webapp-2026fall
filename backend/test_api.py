@@ -4,14 +4,19 @@
 """
 
 import os
-import tempfile
 
-DB_FILE = os.path.join(tempfile.mkdtemp(), "test.db")
-os.environ["DATABASE_URL"] = f"sqlite:///{DB_FILE}"
+os.environ["DATABASE_URL"] = os.getenv(
+    "TEST_DATABASE_URL", "postgresql+psycopg://postgres@127.0.0.1:5432/housemate_test"
+)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from main import app  # noqa: E402
+from models import Base, engine  # noqa: E402
+
+# 每次從空資料庫開始
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
 
 client = TestClient(app)
 
@@ -136,9 +141,9 @@ def main() -> None:
         f"/groups/{gid}/settlements", json={"expense_ids": [e1["id"]]}, headers=amy
     ).json()
     assert s["expense_ids"] == [e1["id"]]
-    assert s["transfers"] == [
-        {"from_member_id": ben_mid, "to_member_id": amy_mid, "amount": 100}
-    ], s["transfers"]
+    [t] = s["transfers"]
+    assert (t["from_member_id"], t["to_member_id"], t["amount"]) == (ben_mid, amy_mid, 100), t
+    assert t["paid_at"] is None, "結算後只是待付款，還沒付"
 
     # 已結的帳不再算進欠款，另一筆還在
     debts = client.get(f"/groups/{gid}/balance", headers=amy).json()
@@ -197,6 +202,19 @@ def main() -> None:
     # 但他之前的未結欠款照算
     debts = client.get(f"/groups/{gid}/balance", headers=amy).json()
     assert debts == [{"from_member_id": amy_mid, "to_member_id": ben_mid, "amount": 200}], debts
+
+    # --- 付款確認：只有收款人能按，按過就不能復原結算（停用的 ben 也能收錢）---
+    s = client.post(
+        f"/groups/{gid}/settlements", json={"expense_ids": [e2["id"]]}, headers=amy
+    ).json()
+    [t] = s["transfers"]  # amy 欠 ben 200
+    paid_url = f"/groups/{gid}/settlements/{s['id']}/transfers/{t['id']}/paid"
+    assert client.post(paid_url, headers=amy).status_code == 403, "付款人不能自己確認"
+    r = client.post(paid_url, headers=ben)
+    assert r.status_code == 200, r.text
+    assert r.json()["transfers"][0]["paid_at"] is not None
+    assert client.post(paid_url, headers=ben).status_code == 409, "不能重複確認"
+    assert client.delete(f"/groups/{gid}/settlements/{s['id']}", headers=amy).status_code == 409
 
     # --- 只有管理員能把人移出群組 ---
     assert client.patch(

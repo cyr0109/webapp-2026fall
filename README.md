@@ -4,6 +4,12 @@
 
 ## 怎麼跑
 
+**資料庫**（PostgreSQL，需要 Docker）：
+
+```bash
+docker compose up -d
+```
+
 開兩個終端機。
 
 **後端**（第一次要先建虛擬環境）：
@@ -34,7 +40,7 @@ npm run dev
 
 ```bash
 cd backend
-.venv/bin/python seed.py   # 會清空 app.db 後重建
+.venv/bin/python seed.py   # 會清空資料庫後重建
 ```
 
 建立群組「民生東路 3F」與三個帳號 `amy` / `ben` / `cindy`，密碼都是 `demo1234`。
@@ -45,7 +51,7 @@ cd backend
 ```bash
 cd backend
 .venv/bin/python split.py      # 分帳與欠款計算
-.venv/bin/python test_api.py   # 註冊 → 記帳 → 欠款 → 結算 → 取消結算
+.venv/bin/python test_api.py   # 註冊 → 記帳 → 欠款 → 結算 → 取消結算 → 確認收款（用 housemate_test 資料庫）
 ```
 
 ## 檔案

@@ -1,12 +1,11 @@
-"""重建 app.db 並塞入一組示範資料，方便展示與檢視畫面。
+"""清空資料庫並塞入一組示範資料，方便展示與檢視畫面。
 
-跑法：./.venv/bin/python seed.py
-注意：會清空現有的 app.db。
+跑法：./.venv/bin/python seed.py（先 docker compose up -d 啟動 PostgreSQL）
+注意：會刪掉 DATABASE_URL 指到的資料庫裡所有資料表。
 
 三個示範帳號密碼都是 demo1234：amy / ben / cindy
 """
 
-import os
 from datetime import date
 
 from auth import hash_password
@@ -16,12 +15,9 @@ from models import (
 )
 from split import equal_shares, pairwise_debts
 
-DB_PATH = "app.db"
-
 
 def main() -> None:
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     db = SessionLocal()
 

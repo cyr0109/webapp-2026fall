@@ -4,7 +4,7 @@ import os
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
-    Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event,
+    Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -105,6 +105,8 @@ class SettlementTransfer(Base):
     from_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     to_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     amount: Mapped[int] = mapped_column(Integer)
+    # 結算只算出「該付」；收款人確認收到才算真的付了
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     settlement: Mapped["Settlement"] = relationship(back_populates="transfers")
 
@@ -172,17 +174,10 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# 本機預設連 docker-compose 的 PostgreSQL；部署時用環境變數指到雲端資料庫
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres@127.0.0.1:5432/housemate")
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
-
-
-@event.listens_for(engine, "connect")
-def _enable_foreign_keys(conn, _record):
-    """SQLite 預設不檢查外鍵，每條連線都要手動打開。"""
-    cur = conn.cursor()
-    cur.execute("PRAGMA foreign_keys=ON")
-    cur.close()
 
 
 def init_db() -> None:
