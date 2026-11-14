@@ -1,6 +1,7 @@
 """租屋分帳 API。"""
 
-from datetime import date
+import secrets
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -9,8 +10,10 @@ from sqlalchemy.orm import Session
 
 from auth import create_token, current_user, get_db, hash_password, verify_password
 from models import (
-    Expense, ExpenseShare, Group, Member, Settlement, SettlementTransfer, User, init_db,
+    Expense, ExpenseShare, Group, Invite, Member, Settlement, SettlementTransfer, User, init_db,
 )
+
+INVITE_TTL = timedelta(days=7)
 from split import equal_shares, pairwise_debts, validate_shares
 
 # 前端透過 Vite 的 proxy 以同源方式呼叫（見 frontend/vite.config.js），所以不需要 CORS。
@@ -92,6 +95,11 @@ class SettlementOut(BaseModel):
 
 class MemberStatusIn(BaseModel):
     status: str = Field(pattern="^(active|deactivated|removed)$")
+
+
+class InviteOut(BaseModel):
+    token: str
+    expires_at: datetime
 
 
 # ---------- 共用檢查 ----------
@@ -252,6 +260,50 @@ def set_member_status(
     target.status = body.status
     db.commit()
     return group_detail(group_id, user, db)
+
+
+# ---------- 邀請連結 ----------
+
+def utcnow_naive() -> datetime:
+    # SQLite 存回來的 DateTime 不帶時區，比較時兩邊都用不帶時區的 UTC
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+@app.post("/groups/{group_id}/invites", response_model=InviteOut)
+def create_invite(
+    group_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """任何成員都能產生邀請連結，7 天內可重複使用。"""
+    get_group(group_id, db)
+    me = require_member(group_id, user, db)
+    invite = Invite(
+        group_id=group_id,
+        token=secrets.token_urlsafe(24),
+        created_by_member_id=me.id,
+        expires_at=utcnow_naive() + INVITE_TTL,
+    )
+    db.add(invite)
+    db.commit()
+    return InviteOut(token=invite.token, expires_at=invite.expires_at)
+
+
+@app.post("/invites/{token}/join", response_model=GroupOut)
+def join_by_invite(token: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """用邀請連結加入。已是成員就直接回群組；被停用或移出的人會恢復為正常成員。"""
+    invite = db.scalar(select(Invite).where(Invite.token == token))
+    if invite is None:
+        raise HTTPException(404, "邀請連結無效")
+    if invite.expires_at < utcnow_naive():
+        raise HTTPException(410, "邀請連結已過期，請向室友要新的連結")
+    member = db.scalar(
+        select(Member).where(Member.group_id == invite.group_id, Member.user_id == user.id)
+    )
+    if member is None:
+        db.add(Member(group_id=invite.group_id, user_id=user.id))
+    else:
+        member.status = "active"
+    db.commit()
+    return group_detail(invite.group_id, user, db)
 
 
 # ---------- 支出 ----------

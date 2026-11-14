@@ -43,18 +43,29 @@ def main() -> None:
 
     assert client.get(f"/groups/{gid}", headers=ben).status_code == 404, "非成員看不到群組"
 
-    # ben 直接加進 DB（邀請連結還沒做）
-    from models import Member, SessionLocal, User
+    # --- 邀請連結：amy 產生，ben 用它加入 ---
+    assert client.post(f"/groups/{gid}/invites", headers=ben).status_code == 404, "非成員不能產生"
+    token = client.post(f"/groups/{gid}/invites", headers=amy).json()["token"]
+    assert client.post("/invites/not-a-token/join", headers=ben).status_code == 404
+    assert client.post(f"/invites/{token}/join").status_code == 401, "要先登入"
+    joined = client.post(f"/invites/{token}/join", headers=ben)
+    assert joined.status_code == 200, joined.text
+    ben_mid = joined.json()["my_member_id"]
+    assert len(joined.json()["members"]) == 2
+    # 重複加入不會多一個成員
+    assert len(client.post(f"/invites/{token}/join", headers=ben).json()["members"]) == 2
+
+    # 過期的連結要被擋
+    from datetime import datetime
+    from models import Invite, SessionLocal
     from sqlalchemy import select
 
     db = SessionLocal()
-    ben_user = db.scalar(select(User).where(User.username == "ben"))
-    db.add(Member(group_id=gid, user_id=ben_user.id))
+    db.scalar(select(Invite).where(Invite.token == token)).expires_at = datetime(2000, 1, 1)
     db.commit()
-    ben_mid = db.scalar(
-        select(Member.id).where(Member.group_id == gid, Member.user_id == ben_user.id)
-    )
     db.close()
+    cindy = auth("cindy")
+    assert client.post(f"/invites/{token}/join", headers=cindy).status_code == 410
 
     # --- 記帳：平分除不盡，餘數給付款人 ---
     e1 = client.post(

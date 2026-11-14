@@ -60,7 +60,8 @@ cd backend
 | `frontend/src/GroupLayout.jsx` | 三個畫面共用的外框，資料在這裡載一次 |
 | `frontend/src/Ledger.jsx` | 帳本：結餘 + 未結項目 |
 | `frontend/src/History.jsx` | 結算紀錄（含每次涵蓋的項目） |
-| `frontend/src/Members.jsx` | 成員管理 |
+| `frontend/src/Members.jsx` | 成員管理、產生邀請連結 |
+| `frontend/src/Join.jsx` | 開啟邀請連結後加入群組 |
 
 ## 畫面
 
@@ -69,7 +70,8 @@ cd backend
 | `/` | 群組列表 |
 | `/g/:id` | 帳本：結餘、未結項目、結算 |
 | `/g/:id/history` | 結算紀錄：誰付誰多少、涵蓋哪些項目、復原 |
-| `/g/:id/members` | 成員：停用／啟用、移出群組 |
+| `/g/:id/members` | 成員：停用／啟用、移出群組、產生邀請連結 |
+| `/join/:token` | 開啟邀請連結，登入後自動加入群組（7 天有效） |
 
 結算完成後會自動跳到結算紀錄，才看得到該轉多少錢給誰。
 
@@ -82,6 +84,4 @@ cd backend
 
 ## 還沒做
 
-- 邀請連結（資料表已備好，`invites`）：目前只能靠直接寫 DB 把人加進群組
 - 站內通知（資料表已備好，`notifications`）
-- 前端 UI 沒有實際點過，只確認過能編譯、能啟動

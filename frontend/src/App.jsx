@@ -7,6 +7,7 @@ import GroupLayout from "./GroupLayout";
 import Ledger from "./Ledger";
 import History from "./History";
 import Members from "./Members";
+import Join from "./Join";
 import "./index.css";
 
 export default function App() {
@@ -35,6 +36,7 @@ export default function App() {
 
         <Routes>
           <Route path="/" element={<Groups />} />
+          <Route path="/join/:token" element={<Join />} />
           <Route path="/g/:groupId" element={<GroupLayout />}>
             <Route index element={<Ledger />} />
             <Route path="history" element={<History />} />

@@ -1,8 +1,16 @@
+import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "./api";
 
 export default function Members() {
   const { group, groupId, me, run } = useOutletContext();
+  const [invite, setInvite] = useState(null);
+
+  const createInvite = () =>
+    run(async () => {
+      const { token, expires_at } = await api(`/groups/${groupId}/invites`, { method: "POST" });
+      setInvite({ url: `${location.origin}/join/${token}`, expires: expires_at.slice(0, 10) });
+    });
 
   const setStatus = (memberId, status) =>
     run(() =>
@@ -57,6 +65,22 @@ export default function Members() {
           );
         })}
       </ul>
+
+      <div className="inline-form" style={{ marginTop: 12 }}>
+        {invite ? (
+          <input readOnly value={invite.url} onFocus={(e) => e.target.select()} aria-label="邀請連結" />
+        ) : null}
+        <button
+          onClick={() =>
+            invite ? navigator.clipboard?.writeText(invite.url) : createInvite()
+          }
+        >
+          {invite ? "複製連結" : "產生邀請連結"}
+        </button>
+      </div>
+      {invite && (
+        <p className="empty">把連結傳給室友，對方登入後就會加入。{invite.expires} 前有效。</p>
+      )}
 
       <p className="empty" style={{ marginTop: 12 }}>
         停用的成員不會出現在新項目中，既有未結款項仍照常計算。移出群組則會解除對方的存取權，
