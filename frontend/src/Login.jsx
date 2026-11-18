@@ -27,7 +27,7 @@ export default function Login({ onDone }) {
 
   return (
     <main className="entry-page">
-      <span className="wordmark">分帳簿</span>
+      <span className="wordmark">HouseMate</span>
       <p className="tagline">記錄合租共同支出，隨時結算。</p>
 
       <form onSubmit={submit}>

@@ -19,7 +19,7 @@ export default function App() {
     <BrowserRouter>
       <div className="page">
         <div className="masthead">
-          <span className="wordmark">分帳簿</span>
+          <span className="wordmark">HouseMate</span>
           <span className="whoami">
             {currentUsername()}
             <button

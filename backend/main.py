@@ -1,4 +1,4 @@
-"""租屋分帳 API。"""
+"""HouseMate API。"""
 
 import secrets
 from datetime import date, datetime, timedelta, timezone
@@ -17,7 +17,7 @@ INVITE_TTL = timedelta(days=7)
 from split import equal_shares, pairwise_debts, validate_shares
 
 # 前端透過 Vite 的 proxy 以同源方式呼叫（見 frontend/vite.config.js），所以不需要 CORS。
-app = FastAPI(title="租屋分帳")
+app = FastAPI(title="HouseMate")
 init_db()
 
 
