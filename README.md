@@ -21,6 +21,17 @@ python3.12 -m venv .venv
 .venv/bin/uvicorn main:app --reload --port 8001
 ```
 
+> **Windows**：本文件的 `.venv/bin/...` 指令在 Windows 不能用，因為 Windows 的虛擬環境放在 `.venv\Scripts\`。
+> 把 `python3.12` 換成 `py -3.12`，`.venv/bin/xxx` 換成 `.venv\Scripts\xxx`，例如：
+>
+> ```powershell
+> py -3.12 -m venv .venv
+> .venv\Scripts\pip install -r requirements.txt
+> .venv\Scripts\uvicorn main:app --reload --port 8001
+> .venv\Scripts\python seed.py
+> .venv\Scripts\python test_api.py
+> ```
+
 API 文件在 http://127.0.0.1:8001/docs
 
 > 用 `127.0.0.1` 不要用 `localhost`：macOS 的 `localhost` 會先解析成 IPv6，
