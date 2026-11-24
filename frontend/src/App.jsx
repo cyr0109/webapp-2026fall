@@ -8,6 +8,8 @@ import Ledger from "./Ledger";
 import History from "./History";
 import Members from "./Members";
 import Join from "./Join";
+import Household from "./Household";
+import Notifications from "./Notifications";
 import "./index.css";
 
 export default function App() {
@@ -41,6 +43,8 @@ export default function App() {
             <Route index element={<Ledger />} />
             <Route path="history" element={<History />} />
             <Route path="members" element={<Members />} />
+            <Route path="household" element={<Household />} />
+            <Route path="notifications" element={<Notifications />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

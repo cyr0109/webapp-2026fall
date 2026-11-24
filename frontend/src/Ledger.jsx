@@ -3,6 +3,7 @@ import { useNavigate, useOutletContext } from "react-router-dom";
 import { api } from "./api";
 import { money, shortDate } from "./format";
 import ExpenseForm from "./ExpenseForm";
+import ConfirmDialog from "./ConfirmDialog";
 
 export default function Ledger() {
   const { group, expenses, debts, groupId, me, nameOf, run, reload } = useOutletContext();
@@ -10,8 +11,10 @@ export default function Ledger() {
   const [selected, setSelected] = useState([]);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const unsettled = expenses.filter((e) => !e.is_settled);
+  const selectedExpenses = unsettled.filter((expense) => selected.includes(expense.id));
   const myDebts = debts.filter((d) => d.from_member_id === me || d.to_member_id === me);
   const otherDebts = debts.filter((d) => d.from_member_id !== me && d.to_member_id !== me);
 
@@ -24,22 +27,11 @@ export default function Ledger() {
   }
 
   async function settle() {
-    const total = unsettled
-      .filter((e) => selected.includes(e.id))
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    // 結算會鎖住項目，先講清楚後果再做
-    const confirmed = confirm(
-      `確定要結算這 ${selected.length} 筆項目嗎？共 ${money(total)}。\n\n` +
-        `結算後這些項目會鎖定，不能再編輯或刪除。\n` +
-        `若要修改，必須先到結算紀錄復原這次結算。`
-    );
-    if (!confirmed) return;
-
+    setConfirming(false);
     const ok = await run(() =>
       api(`/groups/${groupId}/settlements`, {
         method: "POST",
-        body: { expense_ids: selected },
+        body: { expense_ids: selectedExpenses.map((expense) => expense.id) },
       })
     );
     // 結算後跳到紀錄畫面，使用者才看得到該轉多少錢給誰
@@ -108,6 +100,7 @@ export default function Ledger() {
 
         {(adding || editing) && (
           <ExpenseForm
+            key={editing?.id ?? "new"}
             groupId={groupId}
             members={group.members}
             myMemberId={me}
@@ -148,6 +141,7 @@ export default function Ledger() {
                           ? "你未分攤"
                           : `你分攤 ${money(e.shares[me])}`}
                       </span>
+                      {e.due_on && <span className="row-meta">繳款期限 {e.due_on}</span>}
                       <span className="row-actions">
                         <button className="quiet" onClick={() => setEditing(e)}>
                           編輯
@@ -171,7 +165,7 @@ export default function Ledger() {
             </ul>
 
             <div className="actions">
-              {selected.length === 0 ? (
+              {selectedExpenses.length === 0 ? (
                 <>
                   <span className="empty">勾選要一起結算的項目。</span>
                   <button
@@ -183,7 +177,7 @@ export default function Ledger() {
                 </>
               ) : (
                 <>
-                  <button onClick={settle}>結算所選 {selected.length} 筆</button>
+                  <button onClick={() => setConfirming(true)}>結算所選 {selectedExpenses.length} 筆</button>
                   <button className="quiet" onClick={() => setSelected([])}>
                     清除選取
                   </button>
@@ -193,6 +187,12 @@ export default function Ledger() {
           </>
         )}
       </section>
+      {confirming && (
+        <ConfirmDialog title="確認結算" onCancel={() => setConfirming(false)} onConfirm={settle}>
+          <p>結算 {selectedExpenses.length} 筆，共 {money(selectedExpenses.reduce((sum, e) => sum + e.amount, 0))}。</p>
+          <p>結算後項目將鎖定。若要修改，可在確認收款前復原結算。</p>
+        </ConfirmDialog>
+      )}
     </>
   );
 }

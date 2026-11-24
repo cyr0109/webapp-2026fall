@@ -7,3 +7,4 @@ pyjwt
 httpx
 httpx2
 psycopg[binary]
+tzdata

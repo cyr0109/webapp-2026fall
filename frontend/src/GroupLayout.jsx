@@ -10,16 +10,19 @@ export default function GroupLayout() {
 
   const load = useCallback(async () => {
     try {
-      const [group, expenses, debts, settlements] = await Promise.all([
+      const [group, expenses, debts, settlements, inbox] = await Promise.all([
         api(`/groups/${groupId}`),
         api(`/groups/${groupId}/expenses`),
         api(`/groups/${groupId}/balance`),
         api(`/groups/${groupId}/settlements`),
+        api(`/groups/${groupId}/notifications`),
       ]);
-      setData({ group, expenses, debts, settlements });
+      setData({ group, expenses, debts, settlements, inbox });
       setError("");
+      return true;
     } catch (err) {
       setError(err.message);
+      return false;
     }
   }, [groupId]);
 
@@ -33,8 +36,7 @@ export default function GroupLayout() {
       setError("");
       try {
         await fn();
-        await load();
-        return true;
+        return await load();
       } catch (err) {
         setError(err.message);
         return false;
@@ -43,7 +45,7 @@ export default function GroupLayout() {
     [load]
   );
 
-  if (!data) {
+  if (!data || String(data.group.id) !== groupId) {
     return (
       <main className="sheet">
         <div className="block">
@@ -72,6 +74,10 @@ export default function GroupLayout() {
             </NavLink>
             <NavLink to={`/g/${groupId}/history`}>結算紀錄</NavLink>
             <NavLink to={`/g/${groupId}/members`}>成員</NavLink>
+            <NavLink to={`/g/${groupId}/household`}>共居</NavLink>
+            <NavLink to={`/g/${groupId}/notifications`}>
+              通知{data.inbox.unread_count > 0 && ` (${data.inbox.unread_count})`}
+            </NavLink>
           </nav>
         </header>
 

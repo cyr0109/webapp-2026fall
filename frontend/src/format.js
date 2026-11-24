@@ -8,7 +8,17 @@ export function shortDate(iso) {
   return iso.slice(5).replace("-", "/");
 }
 
-/** 2026-09-01T14:03:22 → 2026/09/01 14:03 */
-export function stamp(iso) {
-  return iso.slice(0, 16).replace("T", " ").replaceAll("-", "/");
+const taipeiDateTime = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
+export function taipeiStamp(iso) {
+  return taipeiDateTime.format(new Date(iso));
+}
+
+/** 舊版結算 API 回傳不含時區的 UTC 時間。 */
+export function settlementStamp(iso) {
+  const hasZone = /(?:Z|[+-]\d\d:\d\d)$/i.test(iso);
+  return taipeiStamp(hasZone ? iso : `${iso}Z`);
 }

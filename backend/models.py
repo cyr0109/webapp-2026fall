@@ -4,7 +4,8 @@ import os
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
-    Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
+    CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text,
+    UniqueConstraint, create_engine, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -122,6 +123,7 @@ class Expense(Base):
     amount: Mapped[int] = mapped_column(Integer)
     description: Mapped[str] = mapped_column(String(200))
     spent_on: Mapped[date] = mapped_column(Date)
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     settlement_id: Mapped[int | None] = mapped_column(
         ForeignKey("settlements.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -157,6 +159,12 @@ class Notification(Base):
     """站內通知。summary 存下當時的文字快照，來源被刪掉也還讀得懂。"""
 
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index(
+            "uq_notification_due_reminder",
+            "recipient_member_id", "expense_id", "reminder_due_on", unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
@@ -171,7 +179,43 @@ class Notification(Base):
         ForeignKey("settlements.id", ondelete="CASCADE"), nullable=True
     )
     is_read: Mapped[bool] = mapped_column(default=False)
+    reminder_due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class Availability(Base):
+    __tablename__ = "availabilities"
+    __table_args__ = (CheckConstraint("starts_at < ends_at", name="availability_time_order"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class GarbageSchedule(Base):
+    __tablename__ = "garbage_schedules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    arrives_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    location: Mapped[str] = mapped_column(String(200))
+
+
+class Chore(Base):
+    __tablename__ = "chores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    assigned_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    garbage_schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("garbage_schedules.id", ondelete="SET NULL"), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # 本機預設連 docker-compose 的 PostgreSQL；部署時用環境變數指到雲端資料庫
@@ -181,4 +225,17 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        # Serialize startup schema upgrades when multiple workers start together.
+        conn.execute(text("SELECT pg_advisory_xact_lock(36417301)"))
+        Base.metadata.create_all(conn)
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS due_on DATE"))
+        conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS reminder_due_on DATE"))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_due_reminder
+            ON notifications (recipient_member_id, expense_id, reminder_due_on)
+        """))
+
+
+if __name__ == "__main__":
+    init_db()

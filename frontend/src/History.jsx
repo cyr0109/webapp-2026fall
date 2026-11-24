@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
+import ConfirmDialog from "./ConfirmDialog";
 import { api } from "./api";
-import { money, shortDate, stamp } from "./format";
+import { money, shortDate, settlementStamp } from "./format";
 
 export default function History() {
-  const { expenses, settlements, groupId, me, nameOf, run } = useOutletContext();
+  const { expenses, settlements, group, groupId, me, nameOf, run } = useOutletContext();
+  const [undoId, setUndoId] = useState(null);
 
   return (
     <section className="block">
@@ -34,7 +37,7 @@ export default function History() {
                     {nameOf(s.initiated_by_member_id)} 結算 {covered.length} 筆
                   </span>
                   <span className="row-meta">
-                    {stamp(s.created_at)}，共 {money(total)}
+                    {settlementStamp(s.created_at)}，共 {money(total)}
                   </span>
                 </span>
                 {paid > 0 ? (
@@ -59,7 +62,7 @@ export default function History() {
                           <span className="balance-verb">付給</span>
                           {nameOf(t.to_member_id)}
                           <span className="row-meta">
-                            {t.paid_at ? `已收款 ${stamp(t.paid_at)}` : "待付款"}
+                            {t.paid_at ? `已收款 ${settlementStamp(t.paid_at)}` : "待付款"}
                           </span>
                           {!t.paid_at && t.to_member_id === me && (
                             <button
@@ -105,15 +108,11 @@ export default function History() {
 
                 {s.transfers.some((t) => t.paid_at) ? (
                   <p className="empty">已有人確認收款，這次結算不能復原。</p>
-                ) : (
+                ) : (s.initiated_by_member_id === me || group.i_am_admin) && (
                   <>
                     <button
                       className="quiet danger"
-                      onClick={() =>
-                        run(() =>
-                          api(`/groups/${groupId}/settlements/${s.id}`, { method: "DELETE" })
-                        )
-                      }
+                      onClick={() => setUndoId(s.id)}
                     >
                       復原這次結算
                     </button>
@@ -124,6 +123,19 @@ export default function History() {
             </details>
           );
         })
+      )}
+      {undoId !== null && (
+        <ConfirmDialog
+          title="復原這次結算"
+          onCancel={() => setUndoId(null)}
+          onConfirm={() => {
+            const id = undoId;
+            setUndoId(null);
+            run(() => api(`/groups/${groupId}/settlements/${id}`, { method: "DELETE" }));
+          }}
+        >
+          <p>涵蓋的項目會退回帳本，可以再編輯。</p>
+        </ConfirmDialog>
       )}
     </section>
   );

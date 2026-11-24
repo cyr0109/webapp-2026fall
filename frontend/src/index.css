@@ -132,6 +132,7 @@ h3 {
 
 /* 三個畫面的切換：帳本／結算紀錄／成員 */
 .screen-nav {
+  flex-wrap: wrap;
   display: flex;
   gap: 20px;
   margin-top: 18px;
@@ -531,6 +532,27 @@ legend {
 .switch-mode {
   margin-top: 16px;
   text-align: center;
+}
+
+.confirm-dialog {
+  width: min(92vw, 420px);
+  border: 1px solid currentColor;
+  padding: 24px;
+  color: inherit;
+}
+
+.confirm-dialog::backdrop {
+  background: rgb(0 0 0 / 32%);
+}
+
+.confirm-dialog h2 {
+  margin-top: 0;
+}
+
+.household-error {
+  position: sticky;
+  bottom: 12px;
+  margin: 12px;
 }
 
 @media (max-width: 540px) {
