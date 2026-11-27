@@ -16,7 +16,7 @@ function DateField({ label, value, onChange }) {
   );
 }
 
-function EntryForm({ title, onSave, onCancel, encode, children }) {
+function EntryForm({ title, onSave, onCancel, encode, children, canSave = true }) {
   const [busy, setBusy] = useState(false);
   return (
     <form className="entry-form" onSubmit={async (e) => {
@@ -31,7 +31,7 @@ function EntryForm({ title, onSave, onCancel, encode, children }) {
       <h3>{title}</h3>
       {children}
       <div className="actions">
-        <button disabled={busy}>儲存</button>
+        <button disabled={busy || !canSave}>儲存</button>
         <button type="button" className="ghost" disabled={busy} onClick={onCancel}>取消</button>
       </div>
     </form>
@@ -74,16 +74,24 @@ function ChoreForm({ row, members, schedules, ...actions }) {
   const [scheduled, setScheduled] = useState(toInput(row.scheduled_at));
   const [assigned, setAssigned] = useState(row.assigned_member_id ?? "");
   const [linked, setLinked] = useState(row.garbage_schedule_id ?? "");
+  const [weekly, setWeekly] = useState(Boolean(row.rotation_member_ids));
+  const [rotation, setRotation] = useState(() => (row.rotation_member_ids ?? [])
+    .filter((id) => members.some((member) => member.id === id && member.status === "active")));
   const choices = members.filter((member) => member.status === "active");
+  const slot = schedules.find((schedule) => schedule.id === linked);
+  const available = slot && toInput(slot.arrives_at) === scheduled ? slot.available_member_ids : [];
+  const rotationReady = !weekly || Boolean(row.completed_at) ||
+    (rotation.length >= 2 && rotation.includes(Number(assigned)));
   if (row.completed_at && !choices.some((member) => member.id === assigned)) {
     choices.push({ id: assigned, username: members.find((member) => member.id === assigned)?.username ?? `成員 ${assigned}` });
   }
 
   return (
-    <EntryForm {...actions} title={row.id ? "編輯家務" : "指派家務"}
+    <EntryForm {...actions} title={row.id ? "編輯家務" : "指派家務"} canSave={rotationReady}
       encode={() => ({
         title: title.trim(), scheduled_at: toISO(scheduled), assigned_member_id: Number(assigned),
         garbage_schedule_id: linked || null,
+        rotation_member_ids: row.completed_at ? row.rotation_member_ids : weekly ? rotation : null,
       })}>
       <div className="grid-2">
         <label className="field">
@@ -91,11 +99,15 @@ function ChoreForm({ row, members, schedules, ...actions }) {
           <input required maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
         <label className="field">
-          <span>受指派成員</span>
+            <span>受指派成員</span>
           <select required disabled={Boolean(row.completed_at)} value={assigned}
             onChange={(e) => setAssigned(e.target.value)}>
             <option value="">請選擇成員</option>
-            {choices.map((member) => <option key={member.id} value={member.id}>{member.username}</option>)}
+            {choices.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.username}{available.includes(member.id) ? "（可到場）" : ""}
+              </option>
+            ))}
           </select>
         </label>
         <label className="field">
@@ -116,6 +128,38 @@ function ChoreForm({ row, members, schedules, ...actions }) {
         </label>
         <DateField label="家務時間" value={scheduled} onChange={setScheduled} />
       </div>
+      {!row.completed_at && (
+        <fieldset>
+          <legend>輪值</legend>
+          <label className="check">
+            <input type="checkbox" checked={weekly} onChange={(e) => {
+              setWeekly(e.target.checked);
+              if (e.target.checked && rotation.length === 0 && assigned) setRotation([Number(assigned)]);
+            }} />
+            每週輪值
+          </label>
+          {weekly && (
+            <>
+              <p className="empty">依勾選順序輪值。請選至少兩人，並包含這次的受指派者。</p>
+              {choices.map((member) => (
+                <label key={member.id} className="check">
+                  <input type="checkbox" checked={rotation.includes(member.id)} onChange={(e) => {
+                    const checked = e.target.checked;
+                    setRotation((list) => checked ? [...list, member.id] : list.filter((id) => id !== member.id));
+                  }} />
+                  {member.username}
+                </label>
+              ))}
+              {rotation.length > 0 && (
+                <p className="row-meta">
+                  輪值順序：{rotation.map((id) => choices.find((member) => member.id === id)?.username).join(" → ")}
+                </p>
+              )}
+              <p className="empty">完成這次家務後，系統會建立下一次家務。</p>
+            </>
+          )}
+        </fieldset>
+      )}
     </EntryForm>
   );
 }
@@ -253,6 +297,9 @@ export default function Household() {
                   <span className="row-title">{row.title}</span>
                   <span className="row-meta">{taipeiStamp(row.scheduled_at)} · {nameOf(row.assigned_member_id)}</span>
                   <span className="row-meta">{row.completed_at ? `已完成 ${taipeiStamp(row.completed_at)}` : "待完成"}</span>
+                  {row.rotation_member_ids && (
+                    <span className="row-meta">每週輪值 · {row.rotation_member_ids.map(nameOf).join(" → ")}</span>
+                  )}
                 </div>
                 <RowActions onEdit={manage ? () => edit("chores", row) : null}
                   onDelete={manage ? () => remove("chores", row) : null}>

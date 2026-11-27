@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Annotated, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -49,11 +50,28 @@ class ChoreIn(BaseModel):
     scheduled_at: AwareDatetime
     assigned_member_id: int
     garbage_schedule_id: int | None = None
+    rotation_member_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_rotation(self):
+        if self.rotation_member_ids is None:
+            return self
+        ids = set(self.rotation_member_ids)
+        if len(ids) < 2 or len(ids) != len(self.rotation_member_ids):
+            raise ValueError("輪值至少需要兩位不同的成員")
+        if self.assigned_member_id not in ids:
+            raise ValueError("當次受指派者必須在輪值名單中")
+        return self
 
 
-class ChoreOut(ChoreIn):
+class ChoreOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    title: str
+    scheduled_at: AwareDatetime
+    assigned_member_id: int
+    garbage_schedule_id: int | None
+    rotation_member_ids: list[int] | None
     created_by_member_id: int
     completed_at: AwareDatetime | None
 
@@ -198,11 +216,13 @@ def delete_garbage(group_id: int, row_id: int, user: CurrentUser, db: DB):
 
 
 def validate_chore(db: Session, group_id: int, body: ChoreIn) -> None:
-    target = db.scalar(
-        select(Member).where(Member.id == body.assigned_member_id, Member.group_id == group_id)
-        .with_for_update()
-    )
-    if target is None or target.status != "active":
+    member_ids = set(body.rotation_member_ids or [body.assigned_member_id])
+    active_ids = set(db.scalars(
+        select(Member.id).where(
+            Member.group_id == group_id, Member.id.in_(member_ids), Member.status == "active"
+        ).order_by(Member.id).with_for_update()
+    ))
+    if active_ids != member_ids:
         raise HTTPException(400, "只能指派給同群組且啟用中的成員")
     if body.garbage_schedule_id is not None:
         group_row(db, GarbageSchedule, group_id, body.garbage_schedule_id)
@@ -235,12 +255,18 @@ def manageable_chore(group_id: int, row_id: int, user: User, db: Session) -> Cho
 @router.put("/chores/{row_id}", response_model=ChoreOut)
 def update_chore(group_id: int, row_id: int, body: ChoreIn, user: CurrentUser, db: DB):
     row = manageable_chore(group_id, row_id, user, db)
+    if "rotation_member_ids" not in body.model_fields_set:
+        body.rotation_member_ids = row.rotation_member_ids
     if row.completed_at is not None:
         if body.assigned_member_id != row.assigned_member_id:
             raise HTTPException(409, "已完成的家務不能改派")
+        if body.rotation_member_ids != row.rotation_member_ids:
+            raise HTTPException(409, "請從待完成的家務調整輪值")
         if body.garbage_schedule_id is not None:
             group_row(db, GarbageSchedule, group_id, body.garbage_schedule_id)
     else:
+        if body.rotation_member_ids is not None and body.assigned_member_id not in body.rotation_member_ids:
+            raise HTTPException(400, "當次受指派者必須在輪值名單中")
         validate_chore(db, group_id, body)
     return save(db, row, body)
 
@@ -251,6 +277,34 @@ def delete_chore(group_id: int, row_id: int, user: CurrentUser, db: DB):
     db.commit()
 
 
+def add_next_chore(db: Session, row: Chore) -> None:
+    rotation = row.rotation_member_ids
+    if not rotation:
+        return
+
+    position = rotation.index(row.assigned_member_id) + 1
+    ordered = rotation[position:] + rotation[:position]
+    active_ids = set(db.scalars(
+        select(Member.id)
+        .where(Member.id.in_(ordered), Member.group_id == row.group_id, Member.status == "active")
+        .order_by(Member.id)
+        .with_for_update()
+    ))
+    next_member = next((member_id for member_id in ordered if member_id in active_ids), None)
+    if next_member is None:
+        return
+
+    # Keep the weekday and time. If a chore was completed late, skip elapsed weeks.
+    week = timedelta(weeks=1)
+    elapsed = row.completed_at - row.scheduled_at
+    next_at = row.scheduled_at + max(1, elapsed // week + 1) * week
+    db.add(Chore(
+        group_id=row.group_id, title=row.title, scheduled_at=next_at,
+        created_by_member_id=row.created_by_member_id, assigned_member_id=next_member,
+        rotation_member_ids=rotation,
+    ))
+
+
 @router.patch("/chores/{row_id}/complete", response_model=ChoreOut)
 def complete_chore(group_id: int, row_id: int, user: CurrentUser, db: DB):
     me = require_member(group_id, user, db)
@@ -259,5 +313,6 @@ def complete_chore(group_id: int, row_id: int, user: CurrentUser, db: DB):
         raise HTTPException(403, "只有受指派者可以回報完成")
     if row.completed_at is None:
         row.completed_at = now()
+        add_next_chore(db, row)
         db.commit()
     return row

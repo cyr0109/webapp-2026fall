@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session
 
 from auth import current_user, get_db
 from group_access import require_member
-from models import Expense, ExpenseShare, Member, Notification, User, now
+from models import (
+    Expense, ExpenseShare, Member, Notification, Settlement, SettlementTransfer, User, now,
+)
 
 router = APIRouter(prefix="/groups/{group_id}/notifications")
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -21,6 +23,7 @@ class NotificationOut(BaseModel):
     summary: str
     expense_id: int | None
     settlement_id: int | None
+    transfer_id: int | None
     is_read: bool
     created_at: datetime
 
@@ -44,14 +47,15 @@ def notify(
     )
 
 
-def create_due_reminders(db: Session, member: Member, today: date) -> None:
+def create_expense_reminders(db: Session, member: Member, cutoff: date) -> None:
     eligible = db.execute(
         select(Expense, ExpenseShare.amount)
         .join(ExpenseShare)
         .where(
             Expense.group_id == member.group_id,
             Expense.settlement_id.is_(None),
-            Expense.due_on <= today + timedelta(days=1),
+            Expense.due_on <= cutoff,
+            Expense.payer_member_id != member.id,
             ExpenseShare.member_id == member.id,
             ExpenseShare.amount > 0,
         )
@@ -64,7 +68,7 @@ def create_due_reminders(db: Session, member: Member, today: date) -> None:
         dict(
             group_id=member.group_id, recipient_member_id=member.id,
             actor_member_id=expense.created_by_member_id, event_type="expense_due",
-            summary=f"「{expense.description}」繳款期限為 {expense.due_on}，你的分攤額為 NT$ {amount}。",
+            summary=f"「{expense.description}」繳款期限為 {expense.due_on}，你的應付分攤額為 NT$ {amount}。",
             expense_id=expense.id, reminder_due_on=expense.due_on, is_read=False,
             created_at=now(),
         )
@@ -77,10 +81,56 @@ def create_due_reminders(db: Session, member: Member, today: date) -> None:
     )
 
 
+def create_transfer_reminders(db: Session, member: Member, cutoff: date) -> None:
+    eligible = (
+        SettlementTransfer.from_member_id == member.id,
+        SettlementTransfer.paid_at.is_(None),
+        SettlementTransfer.due_on <= cutoff,
+    )
+    # 收款確認和復原都先鎖結算。取得相同的鎖後，再讀一次待付款狀態。
+    has_due_transfer = select(SettlementTransfer.id).where(
+        SettlementTransfer.settlement_id == Settlement.id, *eligible,
+    ).exists()
+    settlement_ids = db.scalars(
+        select(Settlement.id)
+        .where(Settlement.group_id == member.group_id, has_due_transfer)
+        .order_by(Settlement.id)
+        .with_for_update()
+    ).all()
+    if not settlement_ids:
+        return
+    transfers = db.execute(
+        select(SettlementTransfer, User.username)
+        .join(Member, Member.id == SettlementTransfer.to_member_id)
+        .join(User, User.id == Member.user_id)
+        .where(SettlementTransfer.settlement_id.in_(settlement_ids), *eligible)
+        .order_by(SettlementTransfer.id)
+    ).all()
+    if not transfers:
+        return
+    rows = [
+        dict(
+            group_id=member.group_id, recipient_member_id=member.id,
+            actor_member_id=transfer.to_member_id, event_type="transfer_due",
+            summary=f"請於 {transfer.due_on} 前轉帳 NT$ {transfer.amount} 給 {recipient}。",
+            settlement_id=transfer.settlement_id, transfer_id=transfer.id,
+            reminder_due_on=transfer.due_on, is_read=False, created_at=now(),
+        )
+        for transfer, recipient in transfers
+    ]
+    db.execute(insert(Notification).values(rows).on_conflict_do_nothing(index_elements=["transfer_id"]))
+
+
+def create_due_reminders(db: Session, member: Member, today: date) -> None:
+    cutoff = today + timedelta(days=1)
+    create_expense_reminders(db, member, cutoff)
+    create_transfer_reminders(db, member, cutoff)
+
+
 def to_out(row: Notification) -> NotificationOut:
     return NotificationOut(
         id=row.id, event_type=row.event_type, summary=row.summary, expense_id=row.expense_id,
-        settlement_id=row.settlement_id, is_read=row.is_read,
+        settlement_id=row.settlement_id, transfer_id=row.transfer_id, is_read=row.is_read,
         created_at=row.created_at.replace(tzinfo=timezone.utc),
     )
 

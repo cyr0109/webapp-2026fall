@@ -95,6 +95,7 @@ class SettlementIn(BaseModel):
 class TransferOut(DebtOut):
     id: int
     paid_at: str | None
+    due_on: date | None
 
 
 class SettlementOut(BaseModel):
@@ -445,6 +446,14 @@ def create_settlement(
     db.add(settlement)
     db.flush()
     debts = debts_for(list(expenses))
+    due_dates: dict[tuple[int, int], date] = {}
+    for expense in expenses:
+        if expense.due_on is None:
+            continue
+        for share in expense.shares:
+            if share.amount > 0 and share.member_id != expense.payer_member_id:
+                pair = (share.member_id, expense.payer_member_id)
+                due_dates[pair] = min(due_dates.get(pair, expense.due_on), expense.due_on)
     for debt in debts:
         db.add(
             SettlementTransfer(
@@ -452,6 +461,7 @@ def create_settlement(
                 from_member_id=debt.from_member_id,
                 to_member_id=debt.to_member_id,
                 amount=debt.amount,
+                due_on=due_dates.get((debt.from_member_id, debt.to_member_id)),
             )
         )
     for e in expenses:
@@ -477,6 +487,7 @@ def to_settlement_out(s: Settlement) -> SettlementOut:
                 from_member_id=t.from_member_id,
                 to_member_id=t.to_member_id,
                 amount=t.amount,
+                due_on=t.due_on,
                 paid_at=t.paid_at.isoformat() if t.paid_at else None,
             )
             for t in s.transfers

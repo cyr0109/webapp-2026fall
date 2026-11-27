@@ -2,48 +2,57 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useParams } from "react-router-dom";
 import { api } from "./api";
 
-/** 三個畫面（帳本／結算紀錄／成員）共用的外框：載一次資料，發給子畫面。 */
+/** 群組分頁共用同一份資料。 */
 export default function GroupLayout() {
   const { groupId } = useParams();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    try {
-      const [group, expenses, debts, settlements, inbox] = await Promise.all([
-        api(`/groups/${groupId}`),
-        api(`/groups/${groupId}/expenses`),
-        api(`/groups/${groupId}/balance`),
-        api(`/groups/${groupId}/settlements`),
-        api(`/groups/${groupId}/notifications`),
-      ]);
-      setData({ group, expenses, debts, settlements, inbox });
-      setError("");
-      return true;
-    } catch (err) {
-      setError(err.message);
-      return false;
-    }
+  const fetchGroup = useCallback(async () => {
+    const [group, expenses, debts, settlements, inbox] = await Promise.all([
+      api(`/groups/${groupId}`),
+      api(`/groups/${groupId}/expenses`),
+      api(`/groups/${groupId}/balance`),
+      api(`/groups/${groupId}/settlements`),
+      api(`/groups/${groupId}/notifications`),
+    ]);
+    return { group, expenses, debts, settlements, inbox };
   }, [groupId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let current = true;
+    fetchGroup().then(
+      (result) => {
+        if (!current) return;
+        setData(result);
+        setError("");
+      },
+      (err) => {
+        if (current) setError(err.message);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [fetchGroup]);
 
   /** 執行一個動作後重新載入。成功回傳 true，失敗顯示訊息並回傳 false。 */
   const run = useCallback(
     async (fn) => {
       setError("");
       try {
-        await fn();
-        return await load();
+        if (fn) await fn();
+        setData(await fetchGroup());
+        setError("");
+        return true;
       } catch (err) {
         setError(err.message);
         return false;
       }
     },
-    [load]
+    [fetchGroup]
   );
+  const reload = useCallback(() => run(), [run]);
 
   if (!data || String(data.group.id) !== groupId) {
     return (
@@ -81,7 +90,7 @@ export default function GroupLayout() {
           </nav>
         </header>
 
-        <Outlet context={{ ...data, groupId, me: group.my_member_id, nameOf, run, reload: load }} />
+        <Outlet context={{ ...data, groupId, me: group.my_member_id, nameOf, run, reload }} />
 
         {error && (
           <div className="block">

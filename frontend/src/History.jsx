@@ -64,6 +64,7 @@ export default function History() {
                           <span className="row-meta">
                             {t.paid_at ? `已收款 ${settlementStamp(t.paid_at)}` : "待付款"}
                           </span>
+                          {!t.paid_at && t.due_on && <span className="row-meta">繳款期限 {t.due_on}</span>}
                           {!t.paid_at && t.to_member_id === me && (
                             <button
                               className="quiet"
