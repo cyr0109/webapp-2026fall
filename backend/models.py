@@ -4,9 +4,11 @@ import os
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
-    Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
+    CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text,
+    UniqueConstraint, create_engine, event, inspect, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+from sqlalchemy.dialects.postgresql import ARRAY
 
 
 def now() -> datetime:
@@ -105,6 +107,7 @@ class SettlementTransfer(Base):
     from_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     to_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
     amount: Mapped[int] = mapped_column(Integer)
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     # 結算只算出「該付」；收款人確認收到才算真的付了
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -122,6 +125,7 @@ class Expense(Base):
     amount: Mapped[int] = mapped_column(Integer)
     description: Mapped[str] = mapped_column(String(200))
     spent_on: Mapped[date] = mapped_column(Date)
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     settlement_id: Mapped[int | None] = mapped_column(
         ForeignKey("settlements.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -157,6 +161,13 @@ class Notification(Base):
     """站內通知。summary 存下當時的文字快照，來源被刪掉也還讀得懂。"""
 
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index(
+            "uq_notification_due_reminder",
+            "recipient_member_id", "expense_id", "reminder_due_on", unique=True,
+        ),
+        Index("uq_notification_transfer_reminder", "transfer_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
@@ -170,8 +181,48 @@ class Notification(Base):
     settlement_id: Mapped[int | None] = mapped_column(
         ForeignKey("settlements.id", ondelete="CASCADE"), nullable=True
     )
+    transfer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("settlement_transfers.id", ondelete="CASCADE"), nullable=True
+    )
     is_read: Mapped[bool] = mapped_column(default=False)
+    reminder_due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class Availability(Base):
+    __tablename__ = "availabilities"
+    __table_args__ = (CheckConstraint("starts_at < ends_at", name="availability_time_order"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class GarbageSchedule(Base):
+    __tablename__ = "garbage_schedules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    arrives_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    location: Mapped[str] = mapped_column(String(200))
+
+
+class Chore(Base):
+    __tablename__ = "chores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    assigned_member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    garbage_schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("garbage_schedules.id", ondelete="SET NULL"), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rotation_member_ids: Mapped[list[int] | None] = mapped_column(ARRAY(Integer), nullable=True)
 
 
 # 本機預設連 docker-compose 的 PostgreSQL；部署時用環境變數指到雲端資料庫
@@ -180,5 +231,75 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 
+def install_inbox_trigger(conn) -> None:
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION housemate_inbox_changed() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                PERFORM pg_notify('housemate_inbox',
+                    json_build_array(TG_TABLE_SCHEMA, OLD.group_id, OLD.recipient_member_id)::text);
+                RETURN OLD;
+            END IF;
+            PERFORM pg_notify('housemate_inbox',
+                json_build_array(TG_TABLE_SCHEMA, NEW.group_id, NEW.recipient_member_id)::text);
+            RETURN NEW;
+        END;
+        $$
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE TRIGGER housemate_inbox_changed
+        AFTER INSERT OR UPDATE OF is_read OR DELETE ON notifications
+        FOR EACH ROW EXECUTE FUNCTION housemate_inbox_changed()
+    """))
+
+
+@event.listens_for(Notification.__table__, "after_create")
+def install_inbox_trigger_on_create(table, connection, **kwargs) -> None:
+    # seed.py recreates the table even if the API is already running.
+    install_inbox_trigger(connection)
+
+
+def lock_schema(conn) -> None:
+    conn.execute(text("SELECT pg_advisory_xact_lock(36417301)"))
+
+
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        # Serialize startup schema upgrades when multiple workers start together.
+        lock_schema(conn)
+        Base.metadata.create_all(conn)
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS due_on DATE"))
+        conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS reminder_due_on DATE"))
+        if "due_on" not in {column["name"] for column in inspect(conn).get_columns("settlement_transfers")}:
+            conn.execute(text("ALTER TABLE settlement_transfers ADD COLUMN due_on DATE"))
+            conn.execute(text("""
+                UPDATE settlement_transfers AS transfer
+                SET due_on = (
+                    SELECT MIN(expense.due_on)
+                    FROM expenses AS expense
+                    JOIN expense_shares AS share ON share.expense_id = expense.id
+                    WHERE expense.settlement_id = transfer.settlement_id
+                      AND expense.payer_member_id = transfer.to_member_id
+                      AND share.member_id = transfer.from_member_id
+                      AND share.amount > 0
+                )
+            """))
+        conn.execute(text("""
+            ALTER TABLE notifications ADD COLUMN IF NOT EXISTS transfer_id INTEGER
+                REFERENCES settlement_transfers (id) ON DELETE CASCADE
+        """))
+        conn.execute(text("ALTER TABLE chores ADD COLUMN IF NOT EXISTS rotation_member_ids INTEGER[]"))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_due_reminder
+            ON notifications (recipient_member_id, expense_id, reminder_due_on)
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_transfer_reminder
+            ON notifications (transfer_id)
+        """))
+        install_inbox_trigger(conn)
+
+
+if __name__ == "__main__":
+    init_db()

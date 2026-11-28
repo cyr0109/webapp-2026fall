@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api } from "./api";
-import { money } from "./format";
+import { money, taipeiStamp } from "./format";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => taipeiStamp(new Date()).slice(0, 10);
 
 /** 跟後端 split.equal_shares 同一條規則：除不盡的餘數由墊付人吸收，墊付人未分攤則給第一人。
  *  這裡只負責預填數字讓使用者看得到，最終仍由後端驗證加總。 */
@@ -21,10 +21,15 @@ export default function ExpenseForm({ groupId, members, myMemberId, editing, onS
   const [amount, setAmount] = useState(editing?.amount ?? "");
   const [description, setDescription] = useState(editing?.description ?? "");
   const [spentOn, setSpentOn] = useState(editing?.spent_on ?? today());
+  const [dueOn, setDueOn] = useState(editing?.due_on ?? "");
   const [participants, setParticipants] = useState(
     editing ? Object.keys(editing.shares).map(Number) : active.map((m) => m.id)
   );
-  const [custom, setCustom] = useState(false);
+  const [custom, setCustom] = useState(() => {
+    if (!editing) return false;
+    const equal = previewEqualShares(editing.amount, participants, editing.payer_member_id);
+    return participants.some((id) => equal[id] !== editing.shares[id]);
+  });
   const [shares, setShares] = useState(editing?.shares ?? {});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -51,6 +56,7 @@ export default function ExpenseForm({ groupId, members, myMemberId, editing, onS
       amount: total,
       description,
       spent_on: spentOn,
+      due_on: dueOn || null,
       ...(custom
         ? { shares: Object.fromEntries(participants.map((id) => [id, Number(shares[id]) || 0])) }
         : { participant_member_ids: participants }),
@@ -104,13 +110,17 @@ export default function ExpenseForm({ groupId, members, myMemberId, editing, onS
           </select>
         </label>
         <label className="field">
-          <span>日期</span>
+          <span>支出日期</span>
           <input
             type="date"
             value={spentOn}
             onChange={(e) => setSpentOn(e.target.value)}
             required
           />
+        </label>
+        <label className="field">
+          <span>繳款期限（選填）</span>
+          <input type="date" value={dueOn} onChange={(e) => setDueOn(e.target.value)} />
         </label>
       </div>
 

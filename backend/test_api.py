@@ -4,6 +4,7 @@
 """
 
 import os
+from datetime import datetime, timedelta
 
 os.environ["DATABASE_URL"] = os.getenv(
     "TEST_DATABASE_URL", "postgresql+psycopg://postgres@127.0.0.1:5432/housemate_test"
@@ -12,7 +13,8 @@ os.environ["DATABASE_URL"] = os.getenv(
 from fastapi.testclient import TestClient  # noqa: E402
 
 from main import app  # noqa: E402
-from models import Base, engine  # noqa: E402
+from models import Base, engine, now  # noqa: E402
+from notifications import TAIPEI  # noqa: E402
 
 # 每次從空資料庫開始
 Base.metadata.drop_all(engine)
@@ -25,6 +27,186 @@ def auth(username: str) -> dict:
     r = client.post("/auth/register", json={"username": username, "password": "hunter22"})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['token']}"}
+
+
+def verify_milestone_3() -> None:
+    admin, roommate, third, outsider = map(auth, ("ms3admin", "ms3mate", "ms3third", "ms3outsider"))
+    group = client.post("/groups", json={"name": "MS3 測試"}, headers=admin).json()
+    root = f"/groups/{group['id']}"
+    token = client.post(f"{root}/invites", headers=admin).json()["token"]
+    mate = client.post(f"/invites/{token}/join", headers=roommate).json()["my_member_id"]
+    third_member = client.post(f"/invites/{token}/join", headers=third).json()["my_member_id"]
+    payer = group["my_member_id"]
+    today = now().astimezone(TAIPEI).date()
+    expense_body = {
+        "payer_member_id": payer, "amount": 100, "description": "MS3 網路費",
+        "spent_on": str(today), "due_on": str(today + timedelta(days=2)),
+        "participant_member_ids": [payer, mate],
+    }
+    expenses = f"{root}/expenses"
+    pending = client.post(expenses, json=expense_body, headers=admin)
+    assert pending.status_code == 200, pending.text
+    expense = f"{expenses}/{pending.json()['id']}"
+    inbox = f"{root}/notifications"
+    response = client.get(inbox, headers=roommate).json()
+    assert response["unread_count"] == 1
+    [notice] = response["items"]
+    assert notice["event_type"] == "expense_created"
+    read_url = f"{inbox}/{notice['id']}/read"
+    assert client.patch(read_url, headers=admin).status_code == 404
+    assert client.get(inbox, headers=outsider).status_code == 404
+    assert client.get(inbox + "/events").status_code == 401
+    assert client.get(inbox + "/events", headers=outsider).status_code == 404
+    assert client.patch(read_url, headers=roommate).json()["is_read"]
+
+    # Old callers that omit the field keep the current deadline.
+    without_due = {key: value for key, value in expense_body.items() if key != "due_on"}
+    assert client.put(expense, json=without_due, headers=admin).json()["due_on"] == expense_body["due_on"]
+    assert client.get(inbox, headers=roommate).json()["unread_count"] == 0
+    for delta in (1, 0, -1):
+        expense_body["due_on"] = str(today + timedelta(days=delta))
+        assert client.put(expense, json=expense_body, headers=admin).json()["due_on"] == expense_body["due_on"]
+        for _ in range(2):
+            reminders = [
+                n for n in client.get(inbox, headers=roommate).json()["items"]
+                if n["event_type"] == "expense_due"
+            ]
+            assert len(reminders) == 2 - delta
+            assert expense_body["due_on"] in reminders[0]["summary"]
+    assert client.get(inbox, headers=admin).json()["items"] == []
+
+    # A pending reminder must not be generated once the expense is settled.
+    expense_body["due_on"] = str(today - timedelta(days=2))
+    client.put(expense, json=expense_body, headers=admin)
+    settlement = f"{root}/settlements"
+    selection = {"expense_ids": [pending.json()["id"]]}
+    created = client.post(settlement, json=selection, headers=roommate).json()
+    url = f"{settlement}/{created['id']}"
+    assert client.delete(url, headers=third).status_code == 403
+    [transfer] = created["transfers"]
+    assert transfer["due_on"] == expense_body["due_on"]
+    for _ in range(2):
+        items = client.get(inbox, headers=roommate).json()["items"]
+        assert sum(n["event_type"] == "expense_due" for n in items) == 3
+        [reminder] = [n for n in items if n["event_type"] == "transfer_due"]
+        assert reminder["transfer_id"] == transfer["id"]
+        assert "NT$ 50 給 ms3admin" in reminder["summary"]
+    assert [n["event_type"] for n in client.get(inbox, headers=admin).json()["items"]] == ["settlement_created"]
+    assert client.delete(url, headers=admin).status_code == 204
+    assert all(n["event_type"] != "transfer_due" for n in client.get(inbox, headers=roommate).json()["items"])
+    created = client.post(settlement, json=selection, headers=roommate).json()
+    assert client.delete(f"{settlement}/{created['id']}", headers=roommate).status_code == 204
+    assert client.put(expense, json={**expense_body, "due_on": None}, headers=admin).json()["due_on"] is None
+
+    # Deadlines follow each transfer pair, and a confirmed transfer sends no new reminder.
+    second_body = {
+        **expense_body, "amount": 90, "due_on": str(today),
+        "participant_member_ids": [payer, mate, third_member],
+    }
+    third_body = {
+        **expense_body, "due_on": str(today + timedelta(days=5)),
+        "participant_member_ids": [payer, mate],
+    }
+    new_ids = [client.post(expenses, json=body, headers=admin).json()["id"] for body in (second_body, third_body)]
+    settlement_result = client.post(settlement, json={"expense_ids": new_ids}, headers=admin)
+    assert settlement_result.status_code == 200, settlement_result.text
+    settlement_data = settlement_result.json()
+    transfers = {row["from_member_id"]: row for row in settlement_data["transfers"]}
+    assert transfers[mate]["amount"] == 80 and transfers[mate]["due_on"] == str(today)
+    assert transfers[third_member]["due_on"] == str(today)
+
+    def paid_url(transfer):
+        return f"{settlement}/{settlement_data['id']}/transfers/{transfer['id']}/paid"
+
+    assert client.post(paid_url(transfers[third_member]), headers=admin).status_code == 200
+    assert all(n["event_type"] != "transfer_due" for n in client.get(inbox, headers=third).json()["items"])
+    [unpaid] = [n for n in client.get(inbox, headers=roommate).json()["items"] if n["event_type"] == "transfer_due"]
+    assert unpaid["transfer_id"] == transfers[mate]["id"]
+    assert "NT$ 80" in unpaid["summary"]
+    assert client.post(paid_url(transfers[mate]), headers=admin).status_code == 200
+    assert [n["id"] for n in client.get(inbox, headers=roommate).json()["items"]
+            if n["event_type"] == "transfer_due"] == [unpaid["id"]]
+
+    # Two overlapping slots yield one matching member. Start is inclusive and end is exclusive.
+    availability = f"{root}/availabilities"
+    slot = {"starts_at": "2026-12-01T18:00:00+08:00", "ends_at": "2026-12-01T19:00:00+08:00"}
+    assert client.post(availability, json={**slot, "ends_at": slot["starts_at"]}, headers=roommate).status_code == 422
+    ids = []
+    for _ in range(2):
+        row = client.post(availability, json=slot, headers=roommate)
+        assert row.status_code == 201, row.text
+        ids.append(row.json()["id"])
+    assert client.put(f"{availability}/{ids[0]}", json=slot, headers=admin).status_code == 403
+    assert client.get(availability, headers=outsider).status_code == 404
+    assert client.put(f"{availability}/{ids[0]}", json=slot, headers=roommate).status_code == 200
+    garbage = f"{root}/garbage-schedules"
+    schedule = {"arrives_at": slot["starts_at"], "location": "巷口"}
+    assert client.post(garbage, json=schedule, headers=roommate).status_code == 403
+    assert client.post(garbage, json=schedule, headers=outsider).status_code == 404
+    arrival = client.post(garbage, json=schedule, headers=admin)
+    assert arrival.status_code == 201, arrival.text
+    assert arrival.json()["available_member_ids"] == [mate]
+    arrival_id = arrival.json()["id"]
+    assert client.put(f"{garbage}/{arrival_id}", json={**schedule, "arrives_at": slot["ends_at"]},
+                      headers=admin).json()["available_member_ids"] == []
+    assert client.delete(f"{availability}/{ids[0]}", headers=roommate).status_code == 204
+
+    chores = f"{root}/chores"
+    chore = {"title": "倒垃圾", "scheduled_at": slot["ends_at"],
+             "assigned_member_id": mate, "garbage_schedule_id": arrival_id}
+    outsider_id = client.post("/groups", json={"name": "其他群組"}, headers=outsider).json()["my_member_id"]
+    assert client.post(chores, json={**chore, "assigned_member_id": outsider_id}, headers=admin).status_code == 400
+    client.patch(f"{root}/members/{mate}", json={"status": "deactivated"}, headers=admin)
+    assert client.post(chores, json=chore, headers=admin).status_code == 400
+    client.patch(f"{root}/members/{mate}", json={"status": "active"}, headers=admin)
+    task = client.post(chores, json=chore, headers=admin)
+    assert task.status_code == 201, task.text
+    task_url = f"{chores}/{task.json()['id']}"
+    assert client.put(task_url, json=chore, headers=roommate).status_code == 403
+    assert client.put(task_url, json=chore, headers=admin).status_code == 200
+    assert client.patch(f"{task_url}/complete", headers=admin).status_code == 403
+    completed = client.patch(f"{task_url}/complete", headers=roommate).json()["completed_at"]
+    assert completed and client.patch(f"{task_url}/complete", headers=roommate).json()["completed_at"] == completed
+    assert client.delete(f"{garbage}/{arrival_id}", headers=admin).status_code == 204
+    [saved] = client.get(chores, headers=roommate).json()
+    assert saved["completed_at"] == completed and saved["garbage_schedule_id"] is None
+    assert client.delete(task_url, headers=admin).status_code == 204
+
+    # Weekly chores advance once per completion and skip inactive members.
+    first_time = now() + timedelta(days=1)
+    rotation = {
+        "title": "每週打掃", "scheduled_at": first_time.isoformat(), "assigned_member_id": mate,
+        "rotation_member_ids": [mate, third_member, payer],
+    }
+    assert client.post(chores, json={**rotation, "rotation_member_ids": [mate, outsider_id]},
+                       headers=admin).status_code == 400
+    assert client.post(chores, json={**rotation, "rotation_member_ids": [mate, mate]},
+                       headers=admin).status_code == 422
+    task = client.post(chores, json=rotation, headers=admin)
+    assert task.status_code == 201, task.text
+    initial_url = f"{chores}/{task.json()['id']}/complete"
+    assert client.patch(initial_url, headers=third).status_code == 403
+    member_url = f"{root}/members/{third_member}"
+    assert client.patch(member_url, json={"status": "deactivated"}, headers=admin).status_code == 200
+    for _ in range(2):
+        assert client.patch(initial_url, headers=roommate).status_code == 200
+    first, second = client.get(chores, headers=roommate).json()
+    assert first["completed_at"] and second["completed_at"] is None
+    assert second["assigned_member_id"] == payer
+    assert datetime.fromisoformat(second["scheduled_at"]) == first_time + timedelta(weeks=1)
+    assert second["garbage_schedule_id"] is None
+    assert client.patch(member_url, json={"status": "active"}, headers=admin).status_code == 200
+    second_url = f"{chores}/{second['id']}"
+    assert client.patch(f"{second_url}/complete", headers=admin).status_code == 200
+    third_task = client.get(chores, headers=roommate).json()[-1]
+    assert third_task["assigned_member_id"] == mate
+    assert datetime.fromisoformat(third_task["scheduled_at"]) == first_time + timedelta(weeks=2)
+    third_url = f"{chores}/{third_task['id']}"
+    stop = {**rotation, "scheduled_at": third_task["scheduled_at"], "rotation_member_ids": None}
+    assert client.put(third_url, json=stop, headers=admin).json()["rotation_member_ids"] is None
+    assert client.patch(f"{third_url}/complete", headers=roommate).status_code == 200
+    assert len(client.get(chores, headers=roommate).json()) == 3
+    print("MS3 復原權限、通知與期限、空檔與垃圾車、家務檢查通過")
 
 
 def main() -> None:
@@ -61,7 +243,6 @@ def main() -> None:
     assert len(client.post(f"/invites/{token}/join", headers=ben).json()["members"]) == 2
 
     # 過期的連結要被擋
-    from datetime import datetime
     from models import Invite, SessionLocal
     from sqlalchemy import select
 
@@ -229,3 +410,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    verify_milestone_3()

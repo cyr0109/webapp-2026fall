@@ -6,4 +6,5 @@ bcrypt
 pyjwt
 httpx
 httpx2
-psycopg[binary]
+psycopg[binary]>=3.2.10
+tzdata

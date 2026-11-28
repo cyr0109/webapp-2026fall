@@ -9,15 +9,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from auth import create_token, current_user, get_db, hash_password, verify_password
+from group_access import get_group, require_admin, require_member
+from household import router as household_router
+from inbox_stream import inbox_lifespan
 from models import (
     Expense, ExpenseShare, Group, Invite, Member, Settlement, SettlementTransfer, User, init_db, now,
 )
-
-INVITE_TTL = timedelta(days=7)
+from notifications import notify, router as notification_router, signal_inbox
 from split import equal_shares, pairwise_debts, validate_shares
 
+INVITE_TTL = timedelta(days=7)
+
 # 前端透過 Vite 的 proxy 以同源方式呼叫（見 frontend/vite.config.js），所以不需要 CORS。
-app = FastAPI(title="HouseMate")
+app = FastAPI(title="HouseMate", lifespan=inbox_lifespan)
+app.include_router(household_router)
+app.include_router(notification_router)
 init_db()
 
 
@@ -59,6 +65,7 @@ class ExpenseIn(BaseModel):
     amount: int = Field(gt=0)
     description: str = Field(min_length=1, max_length=200)
     spent_on: date
+    due_on: date | None = None
     # 二選一：給 participant_member_ids 就平分，給 shares 就用自訂金額
     participant_member_ids: list[int] | None = None
     shares: dict[int, int] | None = None
@@ -70,6 +77,7 @@ class ExpenseOut(BaseModel):
     amount: int
     description: str
     spent_on: date
+    due_on: date | None
     shares: dict[int, int]
     settlement_id: int | None
     is_settled: bool
@@ -88,6 +96,7 @@ class SettlementIn(BaseModel):
 class TransferOut(DebtOut):
     id: int
     paid_at: str | None
+    due_on: date | None
 
 
 class SettlementOut(BaseModel):
@@ -109,30 +118,6 @@ class InviteOut(BaseModel):
 
 # ---------- 共用檢查 ----------
 
-def require_member(group_id: int, user: User, db: Session) -> Member:
-    """確認登入者是這個群組的成員，並回傳他的 Member。被移出的人視同不在。"""
-    member = db.scalar(
-        select(Member).where(
-            Member.group_id == group_id, Member.user_id == user.id, Member.status != "removed"
-        )
-    )
-    if member is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到群組，或你不是這個群組的成員")
-    return member
-
-
-def require_admin(group: Group, user: User) -> None:
-    if group.created_by_user_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "只有管理員可以做這件事")
-
-
-def get_group(group_id: int, db: Session) -> Group:
-    group = db.get(Group, group_id)
-    if group is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到群組")
-    return group
-
-
 def to_expense_out(e: Expense) -> ExpenseOut:
     return ExpenseOut(
         id=e.id,
@@ -140,6 +125,7 @@ def to_expense_out(e: Expense) -> ExpenseOut:
         amount=e.amount,
         description=e.description,
         spent_on=e.spent_on,
+        due_on=e.due_on,
         shares={s.member_id: s.amount for s in e.shares},
         settlement_id=e.settlement_id,
         is_settled=e.is_settled,
@@ -263,6 +249,8 @@ def set_member_status(
         if target.user_id == group.created_by_user_id:
             raise HTTPException(400, "管理員不能把自己移出群組")
     target.status = body.status
+    if body.status == "removed":
+        signal_inbox(db, group_id, target.id)
     db.commit()
     return group_detail(group_id, user, db)
 
@@ -328,10 +316,16 @@ def create_expense(
         amount=body.amount,
         description=body.description,
         spent_on=body.spent_on,
+        due_on=body.due_on,
         created_by_member_id=me.id,
         shares=[ExpenseShare(member_id=mid, amount=amt) for mid, amt in shares.items()],
     )
     db.add(expense)
+    db.flush()
+    notify(
+        db, me, {mid for mid, amount in shares.items() if amount > 0}, "expense_created",
+        f"{user.username} 新增支出「{expense.description}」。", expense_id=expense.id,
+    )
     db.commit()
     return to_expense_out(expense)
 
@@ -354,8 +348,11 @@ def list_expenses(
 
 
 def get_editable_expense(group_id: int, expense_id: int, db: Session) -> Expense:
-    expense = db.get(Expense, expense_id)
-    if expense is None or expense.group_id != group_id:
+    expense = db.scalar(
+        select(Expense).where(Expense.id == expense_id, Expense.group_id == group_id)
+        .with_for_update(of=Expense)
+    )
+    if expense is None:
         raise HTTPException(404, "找不到這筆支出")
     if expense.is_settled:
         raise HTTPException(409, "這筆已經結算過了，要先取消該次結算才能修改")
@@ -378,11 +375,17 @@ def update_expense(
     expense.amount = body.amount
     expense.description = body.description
     expense.spent_on = body.spent_on
+    if "due_on" in body.model_fields_set:
+        expense.due_on = body.due_on
     # 先刪舊的分攤列並寫進資料庫，再加新的；否則同一次 flush 會撞到
     # UNIQUE(expense_id, member_id)。
     expense.shares.clear()
     db.flush()
     expense.shares = [ExpenseShare(member_id=mid, amount=amt) for mid, amt in shares.items()]
+    if expense.due_on is not None:
+        for member_id, amount in shares.items():
+            if amount > 0 and member_id != expense.payer_member_id:
+                signal_inbox(db, group_id, member_id)
     db.commit()
     return to_expense_out(expense)
 
@@ -434,7 +437,9 @@ def create_settlement(
     """挑幾筆未結的支出一起算清，算出的結果凍結存下來。"""
     me = require_member(group_id, user, db)
     ids = set(body.expense_ids)
-    expenses = db.scalars(select(Expense).where(Expense.id.in_(ids))).all()
+    expenses = db.scalars(
+        select(Expense).where(Expense.id.in_(ids)).order_by(Expense.id).with_for_update(of=Expense)
+    ).all()
 
     if len(expenses) != len(ids):
         raise HTTPException(404, "有些支出找不到")
@@ -447,17 +452,32 @@ def create_settlement(
     settlement = Settlement(group_id=group_id, initiated_by_member_id=me.id)
     db.add(settlement)
     db.flush()
-    for debt in debts_for(list(expenses)):
+    debts = debts_for(list(expenses))
+    due_dates: dict[tuple[int, int], date] = {}
+    for expense in expenses:
+        if expense.due_on is None:
+            continue
+        for share in expense.shares:
+            if share.amount > 0 and share.member_id != expense.payer_member_id:
+                pair = (share.member_id, expense.payer_member_id)
+                due_dates[pair] = min(due_dates.get(pair, expense.due_on), expense.due_on)
+    for debt in debts:
         db.add(
             SettlementTransfer(
                 settlement_id=settlement.id,
                 from_member_id=debt.from_member_id,
                 to_member_id=debt.to_member_id,
                 amount=debt.amount,
+                due_on=due_dates.get((debt.from_member_id, debt.to_member_id)),
             )
         )
     for e in expenses:
         e.settlement_id = settlement.id
+    notify(
+        db, me, {mid for debt in debts for mid in (debt.from_member_id, debt.to_member_id)},
+        "settlement_created", f"{user.username} 結算了 {len(expenses)} 筆支出，請查看轉帳清單。",
+        settlement_id=settlement.id,
+    )
     db.commit()
     return to_settlement_out(settlement)
 
@@ -474,11 +494,22 @@ def to_settlement_out(s: Settlement) -> SettlementOut:
                 from_member_id=t.from_member_id,
                 to_member_id=t.to_member_id,
                 amount=t.amount,
+                due_on=t.due_on,
                 paid_at=t.paid_at.isoformat() if t.paid_at else None,
             )
             for t in s.transfers
         ],
     )
+
+
+def lock_settlement(db: Session, group_id: int, settlement_id: int) -> Settlement:
+    settlement = db.scalar(
+        select(Settlement).where(Settlement.id == settlement_id, Settlement.group_id == group_id)
+        .with_for_update()
+    )
+    if settlement is None:
+        raise HTTPException(404, "找不到這次結算")
+    return settlement
 
 
 @app.post(
@@ -494,16 +525,19 @@ def confirm_paid(
 ):
     """收款人確認收到這筆轉帳。只有收款人能按，避免付款人自己說付了就算數。"""
     me = require_member(group_id, user, db)
+    settlement = lock_settlement(db, group_id, settlement_id)
     t = db.get(SettlementTransfer, transfer_id)
-    if t is None or t.settlement_id != settlement_id or t.settlement.group_id != group_id:
+    if t is None or t.settlement_id != settlement_id:
         raise HTTPException(404, "找不到這筆轉帳")
     if t.to_member_id != me.id:
         raise HTTPException(403, "只有收款人能確認收到")
     if t.paid_at is not None:
         raise HTTPException(409, "這筆已經確認過了")
     t.paid_at = now()
+    signal_inbox(db, group_id, t.from_member_id)
+    signal_inbox(db, group_id, t.to_member_id)
     db.commit()
-    return to_settlement_out(t.settlement)
+    return to_settlement_out(settlement)
 
 
 @app.get("/groups/{group_id}/settlements", response_model=list[SettlementOut])
@@ -527,13 +561,18 @@ def cancel_settlement(
     db: Session = Depends(get_db),
 ):
     """取消結算：涵蓋的支出退回未結，可以再編輯。"""
-    require_member(group_id, user, db)
-    settlement = db.get(Settlement, settlement_id)
-    if settlement is None or settlement.group_id != group_id:
-        raise HTTPException(404, "找不到這次結算")
+    me = require_member(group_id, user, db)
+    settlement = lock_settlement(db, group_id, settlement_id)
+    if settlement.initiated_by_member_id != me.id:
+        require_admin(get_group(group_id, db), user)
     if any(t.paid_at for t in settlement.transfers):
         raise HTTPException(409, "已經有人確認收款，不能復原這次結算")
+    due_members = set()
     for e in settlement.expenses:
         e.settlement_id = None
+        if e.due_on is not None:
+            due_members.update(s.member_id for s in e.shares if s.amount > 0 and s.member_id != e.payer_member_id)
+    for member_id in due_members:
+        signal_inbox(db, group_id, member_id)
     db.delete(settlement)
     db.commit()
