@@ -11,16 +11,17 @@ from sqlalchemy.orm import Session
 from auth import create_token, current_user, get_db, hash_password, verify_password
 from group_access import get_group, require_admin, require_member
 from household import router as household_router
+from inbox_stream import inbox_lifespan
 from models import (
     Expense, ExpenseShare, Group, Invite, Member, Settlement, SettlementTransfer, User, init_db, now,
 )
-from notifications import notify, router as notification_router
+from notifications import notify, router as notification_router, signal_inbox
 from split import equal_shares, pairwise_debts, validate_shares
 
 INVITE_TTL = timedelta(days=7)
 
 # 前端透過 Vite 的 proxy 以同源方式呼叫（見 frontend/vite.config.js），所以不需要 CORS。
-app = FastAPI(title="HouseMate")
+app = FastAPI(title="HouseMate", lifespan=inbox_lifespan)
 app.include_router(household_router)
 app.include_router(notification_router)
 init_db()
@@ -248,6 +249,8 @@ def set_member_status(
         if target.user_id == group.created_by_user_id:
             raise HTTPException(400, "管理員不能把自己移出群組")
     target.status = body.status
+    if body.status == "removed":
+        signal_inbox(db, group_id, target.id)
     db.commit()
     return group_detail(group_id, user, db)
 
@@ -379,6 +382,10 @@ def update_expense(
     expense.shares.clear()
     db.flush()
     expense.shares = [ExpenseShare(member_id=mid, amount=amt) for mid, amt in shares.items()]
+    if expense.due_on is not None:
+        for member_id, amount in shares.items():
+            if amount > 0 and member_id != expense.payer_member_id:
+                signal_inbox(db, group_id, member_id)
     db.commit()
     return to_expense_out(expense)
 
@@ -527,6 +534,8 @@ def confirm_paid(
     if t.paid_at is not None:
         raise HTTPException(409, "這筆已經確認過了")
     t.paid_at = now()
+    signal_inbox(db, group_id, t.from_member_id)
+    signal_inbox(db, group_id, t.to_member_id)
     db.commit()
     return to_settlement_out(settlement)
 
@@ -558,7 +567,12 @@ def cancel_settlement(
         require_admin(get_group(group_id, db), user)
     if any(t.paid_at for t in settlement.transfers):
         raise HTTPException(409, "已經有人確認收款，不能復原這次結算")
+    due_members = set()
     for e in settlement.expenses:
         e.settlement_id = None
+        if e.due_on is not None:
+            due_members.update(s.member_id for s in e.shares if s.amount > 0 and s.member_id != e.payer_member_id)
+    for member_id in due_members:
+        signal_inbox(db, group_id, member_id)
     db.delete(settlement)
     db.commit()

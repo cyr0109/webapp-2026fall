@@ -18,7 +18,7 @@ docker compose up -d
 cd backend
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn main:app --reload --port 8001
+.venv/bin/uvicorn main:app --reload --port 8001 --timeout-graceful-shutdown 5
 ```
 
 > **Windows**：本文件的 `.venv/bin/...` 指令在 Windows 不能用，因為 Windows 的虛擬環境放在 `.venv\Scripts\`。
@@ -27,7 +27,7 @@ python3.12 -m venv .venv
 > ```powershell
 > py -3.12 -m venv .venv
 > .venv\Scripts\pip install -r requirements.txt
-> .venv\Scripts\uvicorn main:app --reload --port 8001
+> .venv\Scripts\uvicorn main:app --reload --port 8001 --timeout-graceful-shutdown 5
 > .venv\Scripts\python seed.py
 > .venv\Scripts\python test_api.py
 > ```
@@ -113,6 +113,7 @@ cd backend
 - 家務可設定至少兩人的每週輪值。完成當次後，系統會依序建立下一次家務，略過停用成員與已錯過的週次。可從待完成的家務調整輪值或關閉輪值。
 - 支出可選填繳款期限。開啟群組時，系統從到期前一天起提醒應付款的人。未結支出依個人分攤額提醒，不含墊付人自己的份額。
 - 結算後改提醒尚未確認收款的轉帳。轉帳取該付款人欠該收款人的相關支出中最早的期限，提醒金額以相抵後的轉帳額為準。每筆轉帳只提醒一次，確認收款後保留舊通知。
+- 群組頁開啟時會透過 SSE 更新通知列表、未讀數、帳本與結算紀錄，收到新通知會顯示提示。頁面以台北日期跨日時也會重新檢查到期提醒。
 
 ## 現有 PostgreSQL 資料庫升級
 

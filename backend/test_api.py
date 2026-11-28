@@ -55,6 +55,8 @@ def verify_milestone_3() -> None:
     read_url = f"{inbox}/{notice['id']}/read"
     assert client.patch(read_url, headers=admin).status_code == 404
     assert client.get(inbox, headers=outsider).status_code == 404
+    assert client.get(inbox + "/events").status_code == 401
+    assert client.get(inbox + "/events", headers=outsider).status_code == 404
     assert client.patch(read_url, headers=roommate).json()["is_read"]
 
     # Old callers that omit the field keep the current deadline.

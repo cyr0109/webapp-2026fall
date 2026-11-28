@@ -1,40 +1,63 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useParams } from "react-router-dom";
 import { api } from "./api";
+import { useGroupInbox } from "./useGroupInbox";
 
 /** 群組分頁共用同一份資料。 */
 export default function GroupLayout() {
   const { groupId } = useParams();
+  return <GroupView key={groupId} groupId={groupId} />;
+}
+
+function GroupView({ groupId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const nextRequest = useRef(0);
+  const appliedRequest = useRef(0);
 
-  const fetchGroup = useCallback(async () => {
-    const [group, expenses, debts, settlements, inbox] = await Promise.all([
-      api(`/groups/${groupId}`),
-      api(`/groups/${groupId}/expenses`),
-      api(`/groups/${groupId}/balance`),
-      api(`/groups/${groupId}/settlements`),
-      api(`/groups/${groupId}/notifications`),
+  const fetchGroup = useCallback(async (signal) => {
+    const requestId = ++nextRequest.current;
+    const options = { signal };
+    const [group, expenses, debts, settlements] = await Promise.all([
+      api(`/groups/${groupId}`, options),
+      api(`/groups/${groupId}/expenses`, options),
+      api(`/groups/${groupId}/balance`, options),
+      api(`/groups/${groupId}/settlements`, options),
     ]);
-    return { group, expenses, debts, settlements, inbox };
+    return { requestId, data: { group, expenses, debts, settlements } };
   }, [groupId]);
 
+  const applyGroup = useCallback(({ requestId, data }) => {
+    // Live updates and local actions may finish in a different order.
+    if (requestId < appliedRequest.current) return;
+    appliedRequest.current = requestId;
+    setData(data);
+  }, []);
+
+  const refreshFromInbox = useCallback(async (signal) => {
+    try {
+      const result = await fetchGroup(signal);
+      if (!signal.aborted) applyGroup(result);
+    } catch {
+      // A refresh failure should not replace the user's current view or stop notifications.
+    }
+  }, [fetchGroup, applyGroup]);
+  const { inbox, inboxError, toast } = useGroupInbox(groupId, refreshFromInbox);
+
   useEffect(() => {
-    let current = true;
-    fetchGroup().then(
+    const controller = new AbortController();
+    fetchGroup(controller.signal).then(
       (result) => {
-        if (!current) return;
-        setData(result);
+        if (controller.signal.aborted) return;
+        applyGroup(result);
         setError("");
       },
       (err) => {
-        if (current) setError(err.message);
+        if (!controller.signal.aborted) setError(err.message);
       },
     );
-    return () => {
-      current = false;
-    };
-  }, [fetchGroup]);
+    return () => controller.abort();
+  }, [fetchGroup, applyGroup]);
 
   /** 執行一個動作後重新載入。成功回傳 true，失敗顯示訊息並回傳 false。 */
   const run = useCallback(
@@ -42,7 +65,7 @@ export default function GroupLayout() {
       setError("");
       try {
         if (fn) await fn();
-        setData(await fetchGroup());
+        applyGroup(await fetchGroup());
         setError("");
         return true;
       } catch (err) {
@@ -50,7 +73,7 @@ export default function GroupLayout() {
         return false;
       }
     },
-    [fetchGroup]
+    [fetchGroup, applyGroup]
   );
   const reload = useCallback(() => run(), [run]);
 
@@ -85,12 +108,12 @@ export default function GroupLayout() {
             <NavLink to={`/g/${groupId}/members`}>成員</NavLink>
             <NavLink to={`/g/${groupId}/household`}>共居</NavLink>
             <NavLink to={`/g/${groupId}/notifications`}>
-              通知{data.inbox.unread_count > 0 && ` (${data.inbox.unread_count})`}
+              通知{inbox?.unread_count > 0 && ` (${inbox.unread_count})`}
             </NavLink>
           </nav>
         </header>
 
-        <Outlet context={{ ...data, groupId, me: group.my_member_id, nameOf, run, reload }} />
+        <Outlet context={{ ...data, inbox, inboxError, groupId, me: group.my_member_id, nameOf, run, reload }} />
 
         {error && (
           <div className="block">
@@ -98,6 +121,12 @@ export default function GroupLayout() {
           </div>
         )}
       </main>
+      {toast && (
+        <aside className="inbox-toast">
+          <p role="status">{toast}</p>
+          <Link to={`/g/${groupId}/notifications`}>查看通知</Link>
+        </aside>
+      )}
     </>
   );
 }

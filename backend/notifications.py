@@ -1,20 +1,21 @@
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import Text, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from auth import current_user, get_db
+from auth import bearer, current_user, get_db
 from group_access import require_member
+from inbox_stream import TAIPEI
 from models import (
-    Expense, ExpenseShare, Member, Notification, Settlement, SettlementTransfer, User, now,
+    Expense, ExpenseShare, Member, Notification, SessionLocal, Settlement, SettlementTransfer,
+    User, now,
 )
 
 router = APIRouter(prefix="/groups/{group_id}/notifications")
-TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 class NotificationOut(BaseModel):
@@ -33,6 +34,12 @@ class InboxOut(BaseModel):
     unread_count: int
 
 
+def signal_inbox(db: Session, group_id: int, member_id: int) -> None:
+    """Refresh an inbox when eligibility changes without creating an event notification."""
+    payload = func.json_build_array(func.current_schema(), group_id, member_id)
+    db.execute(select(func.pg_notify("housemate_inbox", payload.cast(Text))))
+
+
 def notify(
     db: Session, actor: Member, recipients: set[int], event_type: str, summary: str,
     *, expense_id: int | None = None, settlement_id: int | None = None,
@@ -45,6 +52,8 @@ def notify(
         )
         for member_id in sorted(recipients - {actor.id})
     )
+    if actor.id in recipients:
+        signal_inbox(db, actor.group_id, actor.id)
 
 
 def create_expense_reminders(db: Session, member: Member, cutoff: date) -> None:
@@ -150,6 +159,22 @@ def inbox(
         .order_by(Notification.created_at.desc(), Notification.id.desc())
     ).all()
     return InboxOut(items=[to_out(row) for row in rows], unread_count=sum(not row.is_read for row in rows))
+
+
+@router.get("/events", response_class=StreamingResponse)
+def inbox_events(
+    group_id: int, request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+):
+    # Release the DB session before keeping the HTTP connection open.
+    with SessionLocal() as db:
+        user = current_user(credentials, db)
+        member_id = require_member(group_id, user, db).id
+    return StreamingResponse(
+        request.app.state.inbox_stream.events(group_id, member_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.patch("/{notification_id}/read", response_model=NotificationOut)

@@ -3,15 +3,18 @@ import { api } from "./api";
 import { taipeiStamp } from "./format";
 
 export default function Notifications() {
-  const { groupId, inbox, run } = useOutletContext();
+  const { groupId, inbox, inboxError, run } = useOutletContext();
 
   return (
     <section className="block">
       <div className="block-head">
         <h2 className="block-title">站內通知</h2>
-        <span className="block-note">{inbox.unread_count} 則未讀</span>
+        {inbox && <span className="block-note">{inbox.unread_count} 則未讀</span>}
       </div>
-      {inbox.items.length === 0 ? <p className="empty">目前沒有通知。</p> : (
+      {inboxError && <p className="notice">{inboxError}</p>}
+      {!inbox && !inboxError && <p className="empty">載入中</p>}
+      {inbox?.items.length === 0 && <p className="empty">目前沒有通知。</p>}
+      {inbox?.items.length > 0 && (
         <ul className="rows">
           {inbox.items.map((item) => (
             <li className="row" key={item.id}>

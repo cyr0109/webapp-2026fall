@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text,
-    UniqueConstraint, create_engine, inspect, text,
+    UniqueConstraint, create_engine, event, inspect, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -231,6 +231,35 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 
+def install_inbox_trigger(conn) -> None:
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION housemate_inbox_changed() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                PERFORM pg_notify('housemate_inbox',
+                    json_build_array(TG_TABLE_SCHEMA, OLD.group_id, OLD.recipient_member_id)::text);
+                RETURN OLD;
+            END IF;
+            PERFORM pg_notify('housemate_inbox',
+                json_build_array(TG_TABLE_SCHEMA, NEW.group_id, NEW.recipient_member_id)::text);
+            RETURN NEW;
+        END;
+        $$
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE TRIGGER housemate_inbox_changed
+        AFTER INSERT OR UPDATE OF is_read OR DELETE ON notifications
+        FOR EACH ROW EXECUTE FUNCTION housemate_inbox_changed()
+    """))
+
+
+@event.listens_for(Notification.__table__, "after_create")
+def install_inbox_trigger_on_create(table, connection, **kwargs) -> None:
+    # seed.py recreates the table even if the API is already running.
+    install_inbox_trigger(connection)
+
+
 def init_db() -> None:
     with engine.begin() as conn:
         # Serialize startup schema upgrades when multiple workers start together.
@@ -265,6 +294,7 @@ def init_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_transfer_reminder
             ON notifications (transfer_id)
         """))
+        install_inbox_trigger(conn)
 
 
 if __name__ == "__main__":
