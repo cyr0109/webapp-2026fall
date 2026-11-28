@@ -1,19 +1,21 @@
-"""清空資料庫並塞入一組示範資料，方便展示與檢視畫面。
+"""建立一組示範資料，方便展示與檢視畫面。
 
-跑法：./.venv/bin/python seed.py（先 docker compose up -d 啟動 PostgreSQL）
-注意：會重建 DATABASE_URL 指到的資料庫裡的應用程式資料表。
+使用 --if-empty 時，只在尚無帳號的資料庫載入。
+不帶參數時會重建 DATABASE_URL 指到的應用程式資料表。
 
 三個示範帳號密碼都是 demo1234：amy / ben / cindy
 """
 
+from argparse import ArgumentParser
 from datetime import date, datetime, time, timedelta
 
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from auth import hash_password
 from models import (
     Availability, Base, Chore, Expense, ExpenseShare, GarbageSchedule, Group, Member,
-    SessionLocal, Settlement, SettlementTransfer, User, now,
+    SessionLocal, Settlement, SettlementTransfer, User, init_db, lock_schema, now,
 )
 from notifications import TAIPEI, create_due_reminders, notify
 from split import equal_shares, pairwise_debts
@@ -140,14 +142,26 @@ def seed(db: Session) -> None:
         create_due_reminders(db, member, today)
 
 
-def main() -> None:
+def main(*, if_empty: bool = False) -> None:
+    if if_empty:
+        init_db()
     with SessionLocal.begin() as db:
         conn = db.connection()
-        Base.metadata.drop_all(conn)
-        Base.metadata.create_all(conn)
+        lock_schema(conn)
+        if if_empty:
+            # Block concurrent registrations until the empty check and seed commit finish.
+            conn.execute(text("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE"))
+            if db.scalar(select(User.id).limit(1)) is not None:
+                print("資料庫已有帳號，略過示範資料。")
+                return
+        else:
+            Base.metadata.drop_all(conn)
+            Base.metadata.create_all(conn)
         seed(db)
     print("示範資料已建立。登入：amy / ben / cindy，密碼都是 demo1234")
 
 
 if __name__ == "__main__":
-    main()
+    parser = ArgumentParser(description="建立 HouseMate 示範資料")
+    parser.add_argument("--if-empty", action="store_true", help="只在尚無帳號時載入")
+    main(if_empty=parser.parse_args().if_empty)

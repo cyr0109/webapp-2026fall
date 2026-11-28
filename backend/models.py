@@ -260,10 +260,14 @@ def install_inbox_trigger_on_create(table, connection, **kwargs) -> None:
     install_inbox_trigger(connection)
 
 
+def lock_schema(conn) -> None:
+    conn.execute(text("SELECT pg_advisory_xact_lock(36417301)"))
+
+
 def init_db() -> None:
     with engine.begin() as conn:
         # Serialize startup schema upgrades when multiple workers start together.
-        conn.execute(text("SELECT pg_advisory_xact_lock(36417301)"))
+        lock_schema(conn)
         Base.metadata.create_all(conn)
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS due_on DATE"))
         conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS reminder_due_on DATE"))

@@ -2,12 +2,37 @@
 
 合租室友的共同支出，先記下來，之後再挑幾筆一起算清。紀錄永久保留。
 
-## 怎麼跑
+## 用 Docker Compose 啟動
+
+在專案根目錄執行：
+
+```bash
+docker compose up --build --wait
+```
+
+網站在 [http://127.0.0.1:8080](http://127.0.0.1:8080)，API 文件在
+[http://127.0.0.1:8080/api/docs](http://127.0.0.1:8080/api/docs)。Compose 會依序等待
+PostgreSQL、FastAPI 與前端健康檢查。前端由 Nginx 提供，`/api/` 會轉送到 FastAPI，
+包含站內通知的 SSE 串流。
+
+尚無帳號的資料庫會自動載入下方的示範資料。有帳號時會跳過，既有資料仍保存在
+`pgdata` 資料卷。開機時若不想載入示範資料，可在專案根目錄的 `.env` 設定
+`HOUSEMATE_SEED_DEMO=0`。可用 `HOUSEMATE_WEB_PORT` 或 `HOUSEMATE_DB_PORT` 更改主機埠，
+預設分別為 8080 和 5432。
+
+```bash
+docker compose ps
+docker compose down
+```
+
+`docker compose down` 停止服務並保留資料卷。開發與展示請使用本機設定。
+
+## 本機開發模式
 
 **資料庫**（PostgreSQL，需要 Docker）：
 
 ```bash
-docker compose up -d
+docker compose up -d db
 ```
 
 開兩個終端機。
@@ -51,9 +76,17 @@ npm run dev
 
 ## 示範資料
 
+完整 Compose 環境可手動檢查並在空資料庫匯入：
+
 ```bash
-cd backend
-.venv/bin/python seed.py   # 會清空資料庫後重建
+docker compose exec backend python seed.py --if-empty
+```
+
+本機開發模式可在 `backend` 執行 `.venv/bin/python seed.py --if-empty`。
+若確定要清空開發資料並重建示範資料，才移除 `--if-empty`：
+
+```bash
+docker compose exec backend python seed.py
 ```
 
 建立群組「民生東路 3F」與三個帳號 `amy` / `ben` / `cindy`，密碼都是 `demo1234`。

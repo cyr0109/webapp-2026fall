@@ -1,5 +1,4 @@
-# 本機開發用的 PostgreSQL。只聽 127.0.0.1，所以不設密碼（trust）。
-# 部署時改用雲端 PostgreSQL，只要換 DATABASE_URL。
+# 本機開發與展示用。對主機開放的埠只綁 127.0.0.1。
 services:
   db:
     image: postgres:16
@@ -7,10 +6,44 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
       POSTGRES_DB: housemate
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${HOUSEMATE_DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "housemate"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres@db:5432/housemate
+      HOUSEMATE_SEED_DEMO: "${HOUSEMATE_SEED_DEMO:-1}"
+      SECRET_KEY:
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/openapi.json', timeout=3).close()"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:${HOUSEMATE_WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
 volumes:
   pgdata:
