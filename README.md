@@ -2,21 +2,31 @@
 
 合租室友的共同支出，先記下來，之後再挑幾筆一起算清。紀錄永久保留。
 
-## 用 Docker Compose 啟動
+## 選一種啟動方式
 
-在專案根目錄執行：
+| 方式 | 執行環境 | 網站 |
+| --- | --- | --- |
+| **A．Docker Compose 一鍵啟動** | 前端、後端、資料庫都由 Docker 啟動。可選展示模式或自動重載的開發模式。 | [127.0.0.1:8080](http://127.0.0.1:8080) |
+| **B．本機開發** | Docker 只啟動資料庫，FastAPI 與 Vite 由本機終端機啟動。適合修改程式並即時預覽。 | [localhost:5173](http://localhost:5173) |
+
+以下兩套步驟擇一執行。
+
+### A．Docker Compose 一鍵啟動
+
+#### A1．展示模式
+
+準備 Docker 與 Docker Compose，在專案根目錄執行這一條指令：
 
 ```bash
 docker compose up --build --wait
 ```
 
-網站在 [http://127.0.0.1:8080](http://127.0.0.1:8080)，API 文件在
-[http://127.0.0.1:8080/api/docs](http://127.0.0.1:8080/api/docs)。Compose 會依序等待
-PostgreSQL、FastAPI 與前端健康檢查。前端由 Nginx 提供，`/api/` 會轉送到 FastAPI，
-包含站內通知的 SSE 串流。
+指令完成後，直接開啟 [HouseMate](http://127.0.0.1:8080)。Compose 已啟動三個服務並等待它們就緒。
+API 文件在 [127.0.0.1:8080/api/docs](http://127.0.0.1:8080/api/docs)。
+前端由 Nginx 提供，`/api/` 會轉送到 FastAPI，包含站內通知的 SSE 串流。
 
 尚無帳號的資料庫會自動載入下方的示範資料。有帳號時會跳過，既有資料仍保存在
-`pgdata` 資料卷。開機時若不想載入示範資料，可在專案根目錄的 `.env` 設定
+`pgdata` 資料卷。啟動時若不想載入示範資料，可在專案根目錄的 `.env` 設定
 `HOUSEMATE_SEED_DEMO=0`。可用 `HOUSEMATE_WEB_PORT` 或 `HOUSEMATE_DB_PORT` 更改主機埠，
 預設分別為 8080 和 5432。
 
@@ -25,19 +35,36 @@ docker compose ps
 docker compose down
 ```
 
-`docker compose down` 停止服務並保留資料卷。開發與展示請使用本機設定。
+`docker compose ps` 查看服務狀態，`docker compose down` 停止服務並保留資料卷。
 
-## 本機開發模式
+#### A2．Docker 開發模式
 
-**資料庫**（PostgreSQL，需要 Docker）：
+在專案根目錄執行以下指令，啟動開發容器與 [Compose Watch](https://docs.docker.com/compose/how-tos/file-watch/)：
 
 ```bash
-docker compose up -d db
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build --watch
 ```
 
-開兩個終端機。
+開啟 [HouseMate](http://127.0.0.1:8080)。將終端機保持開啟，存檔後容器會同步程式碼。
+修改前端時 Vite 會更新瀏覽器，修改 Python 時 Uvicorn 會重載 API。修改套件清單或
+Dockerfile 時會重新建置對應的容器。
 
-**後端**（第一次要先建虛擬環境）：
+A1 與 A2 使用同一個網址和 PostgreSQL 資料卷。按 `Ctrl+C` 結束開發模式，
+要切回展示時再執行 A1 的指令。
+
+### B．本機開發
+
+準備 Docker Compose、Python 3.12 與 Node.js 22。以下三步都要執行。
+若已用方式 A 啟動，要切換到本機開發時，可先在專案根目錄執行
+`docker compose stop frontend backend`，留下資料庫容器。
+
+**1．資料庫。** 在專案根目錄只啟動 PostgreSQL：
+
+```bash
+docker compose up --wait db
+```
+
+**2．後端。** 開第一個終端機，從專案根目錄進入 `backend`。第一次先建立虛擬環境並安裝依賴：
 
 ```bash
 cd backend
@@ -46,15 +73,13 @@ python3.12 -m venv .venv
 .venv/bin/uvicorn main:app --reload --port 8001 --timeout-graceful-shutdown 5
 ```
 
-> **Windows**：本文件的 `.venv/bin/...` 指令在 Windows 不能用，因為 Windows 的虛擬環境放在 `.venv\Scripts\`。
-> 把 `python3.12` 換成 `py -3.12`，`.venv/bin/xxx` 換成 `.venv\Scripts\xxx`，例如：
+> **Windows PowerShell** 使用下列指令啟動後端：
 >
 > ```powershell
+> cd backend
 > py -3.12 -m venv .venv
 > .venv\Scripts\pip install -r requirements.txt
 > .venv\Scripts\uvicorn main:app --reload --port 8001 --timeout-graceful-shutdown 5
-> .venv\Scripts\python seed.py
-> .venv\Scripts\python test_api.py
 > ```
 
 API 文件在 http://127.0.0.1:8001/docs
@@ -62,32 +87,26 @@ API 文件在 http://127.0.0.1:8001/docs
 > 用 `127.0.0.1` 不要用 `localhost`：macOS 的 `localhost` 會先解析成 IPv6，
 > 而 uvicorn 只聽 IPv4。前端不受影響，它走 Vite 的 proxy。
 
-**前端**：
+**3．前端。** 開第二個終端機，從專案根目錄進入 `frontend`：
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-網站在 http://localhost:5173
+啟動後開啟 [HouseMate](http://localhost:5173)。
 
 若另開一組本機後端做測試，可用 `HOUSEMATE_API_TARGET` 指定 Vite 的 API 代理目標。
 
 ## 示範資料
 
-完整 Compose 環境可手動檢查並在空資料庫匯入：
+- **方式 A** 預設在首次啟動時載入。若要手動匯入，從專案根目錄執行
+  `docker compose exec backend python seed.py --if-empty`。
+- **方式 B** 可在資料庫啟動後，於 `backend` 目錄執行 `.venv/bin/python seed.py --if-empty`。
+  Windows PowerShell 改用 `.venv\Scripts\python seed.py --if-empty`。
 
-```bash
-docker compose exec backend python seed.py --if-empty
-```
-
-本機開發模式可在 `backend` 執行 `.venv/bin/python seed.py --if-empty`。
-若確定要清空開發資料並重建示範資料，才移除 `--if-empty`：
-
-```bash
-docker compose exec backend python seed.py
-```
+上述指令會在資料庫已有帳號時跳過。移除 `--if-empty` 會清空並重建應用程式的資料表。
 
 建立群組「民生東路 3F」與三個帳號 `amy` / `ben` / `cindy`，密碼都是 `demo1234`。
 含 5 筆支出，其中 2 筆已結算。「電費 7-8 月」的繳款期限為執行腳本的隔天（台北時間），
@@ -97,6 +116,8 @@ docker compose exec backend python seed.py
 下一週的同一時段會指派給 cindy。同頁也能看到 cindy 已完成的「打掃公共區域」。
 
 ## 怎麼測
+
+以下是選用的本機測試指令，需先依方式 B 準備資料庫和 Python 環境。
 
 ```bash
 cd backend
